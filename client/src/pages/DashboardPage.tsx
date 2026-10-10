@@ -15,6 +15,7 @@ import {
   SUPPORTED_CURRENCIES,
   type CurrencyCode
 } from '@lumaspend/shared';
+import { useAuth } from '@/context/AuthContext';
 
 type DashboardTab = 'overview' | 'transactions' | 'budgets' | 'analytics' | 'ai' | 'settings';
 
@@ -31,9 +32,12 @@ interface TransactionItem {
 export const DashboardPage: React.FC = () => {
   const navigate = useNavigate();
   const { toast } = useToast();
+  const { user, logout, updateProfile } = useAuth();
 
   const [activeTab, setActiveTab] = useState<DashboardTab>('overview');
-  const [currency, setCurrency] = useState<CurrencyCode>(DEFAULT_CURRENCY);
+  const [currency, setCurrency] = useState<CurrencyCode>(
+    user?.preferences?.defaultCurrency || DEFAULT_CURRENCY
+  );
   const [isAddTxOpen, setIsAddTxOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [filterType, setFilterType] = useState<'all' | 'income' | 'expense'>('all');
@@ -146,12 +150,24 @@ export const DashboardPage: React.FC = () => {
           </div>
           <div className="flex items-center gap-3 p-2.5 rounded-xl bg-surface-default/60 border border-white/5">
             <div className="h-8 w-8 rounded-full bg-gradient-to-br from-brand-violet to-brand-blue flex items-center justify-center font-bold text-white text-xs">
-              SC
+              {(user?.displayName || 'LS').slice(0, 2).toUpperCase()}
             </div>
             <div className="flex-1 overflow-hidden">
-              <p className="text-xs font-semibold text-white truncate">Sriteja</p>
-              <p className="text-[10px] text-text-muted truncate">sriteja@lumaspend.io</p>
+              <p className="text-xs font-semibold text-white truncate">{user?.displayName || 'LumaSpend User'}</p>
+              <p className="text-[10px] text-text-muted truncate">{user?.email || 'user@lumaspend.io'}</p>
             </div>
+            <button
+              onClick={async () => {
+                await logout();
+                toast({ title: 'Signed Out', description: 'Session ended successfully', type: 'info' });
+                navigate('/login');
+              }}
+              title="Sign Out"
+              aria-label="Sign Out"
+              className="p-1.5 text-text-muted hover:text-finance-expense transition-colors"
+            >
+              <Icons.Error className="h-4 w-4" />
+            </button>
           </div>
         </div>
       </aside>
@@ -186,10 +202,14 @@ export const DashboardPage: React.FC = () => {
             <Button
               variant="glass"
               size="sm"
-              onClick={() => navigate('/')}
+              onClick={async () => {
+                await logout();
+                toast({ title: 'Signed Out', description: 'Session ended successfully', type: 'info' });
+                navigate('/login');
+              }}
               className="text-xs text-text-secondary"
             >
-              Exit to Landing
+              Sign Out
             </Button>
           </div>
         </header>
@@ -493,9 +513,10 @@ export const DashboardPage: React.FC = () => {
                   </p>
                   <select
                     value={currency}
-                    onChange={(e) => {
+                    onChange={async (e) => {
                       const newCurr = e.target.value as CurrencyCode;
                       setCurrency(newCurr);
+                      await updateProfile({ defaultCurrency: newCurr });
                       toast({ title: 'Currency Updated', description: `Base currency changed to ${newCurr}`, type: 'success' });
                     }}
                     className="h-10 px-3 rounded-xl bg-surface-elevated border border-white/10 text-xs text-text-primary"

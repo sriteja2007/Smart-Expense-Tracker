@@ -5,3 +5,4 @@ export * from './types/transaction.js';
 export * from './constants/status-codes.js';
 export * from './errors/api-error.js';
 export * from './schemas/env.schema.js';
+export * from './schemas/auth.schema.js';

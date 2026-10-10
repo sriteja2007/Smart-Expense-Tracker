@@ -2,6 +2,8 @@ import type { CurrencyCode } from './currency.js';
 
 export type UserRole = 'user' | 'admin' | 'household_manager' | 'household_member';
 
+export type AuthProviderType = 'local' | 'google' | 'both';
+
 export interface UserPreferences {
   defaultCurrency: CurrencyCode;
   theme: 'dark' | 'light' | 'system';
@@ -16,6 +18,7 @@ export interface UserProfile {
   displayName: string;
   avatarUrl?: string;
   role: UserRole;
+  authProvider: AuthProviderType;
   preferences: UserPreferences;
   createdAt: string;
   updatedAt: string;
@@ -23,6 +26,14 @@ export interface UserProfile {
 
 export interface AuthSession {
   user: UserProfile;
-  token: string;
+  token?: string;
   expiresAt: string;
+}
+
+export interface AuthTokenPayload {
+  userId: string;
+  email: string;
+  role: UserRole;
+  iat?: number;
+  exp?: number;
 }

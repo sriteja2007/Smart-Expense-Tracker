@@ -3,15 +3,19 @@ import { describe, it, expect } from 'vitest';
 import App from '../App';
 import { Hero3DFallback } from '../components/3d/Hero3DFallback';
 import { NotFoundPage } from '../pages/NotFoundPage';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { DashboardPage } from '../pages/DashboardPage';
 import { ToastProvider } from '../components/ui/toast';
+import { AuthProvider } from '../context/AuthContext';
+import { ProtectedRoute } from '../components/auth/ProtectedRoute';
 
 describe('LumaSpend Visual Foundation & Navigation Suite', () => {
-  it('renders landing page with headline, branding, and INR default badges', () => {
+  it('renders landing page with headline, branding, and INR default badges', async () => {
     render(<App />);
+    await waitFor(() => {
+      expect(screen.getByText(/3D Spatial Clarity/i)).toBeInTheDocument();
+    });
     expect(screen.getAllByText(/LumaSpend/i).length).toBeGreaterThan(0);
-    expect(screen.getByText(/3D Spatial Clarity/i)).toBeInTheDocument();
     expect(screen.getAllByText(/INR/i).length).toBeGreaterThan(0);
   });
 
@@ -23,17 +27,21 @@ describe('LumaSpend Visual Foundation & Navigation Suite', () => {
     expect(screen.getByText(/Smart AI Audit: Optimized/i)).toBeInTheDocument();
   });
 
-  it('renders Dashboard shell with sidebar, INR stats, and ledger table', () => {
+  it('renders Dashboard shell with sidebar, INR stats, and ledger table', async () => {
     render(
       <ToastProvider>
-        <MemoryRouter>
-          <DashboardPage />
-        </MemoryRouter>
+        <AuthProvider>
+          <MemoryRouter>
+            <DashboardPage />
+          </MemoryRouter>
+        </AuthProvider>
       </ToastProvider>
     );
 
     // Verify key metrics & tabs
-    expect(screen.getByText(/Total Inflow/i)).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText(/Total Inflow/i)).toBeInTheDocument();
+    });
     expect(screen.getByText(/Total Outflow/i)).toBeInTheDocument();
     expect(screen.getByText(/Net Savings Reserve/i)).toBeInTheDocument();
 
@@ -47,9 +55,11 @@ describe('LumaSpend Visual Foundation & Navigation Suite', () => {
   it('allows recording a new transaction via modal in Dashboard', async () => {
     render(
       <ToastProvider>
-        <MemoryRouter>
-          <DashboardPage />
-        </MemoryRouter>
+        <AuthProvider>
+          <MemoryRouter>
+            <DashboardPage />
+          </MemoryRouter>
+        </AuthProvider>
       </ToastProvider>
     );
 
@@ -87,5 +97,31 @@ describe('LumaSpend Visual Foundation & Navigation Suite', () => {
     expect(screen.getByText(/404 — Ledger Void/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Return Home/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Open Dashboard/i })).toBeInTheDocument();
+  });
+
+  it('ProtectedRoute protects views and restores session', async () => {
+    render(
+      <ToastProvider>
+        <AuthProvider>
+          <MemoryRouter initialEntries={['/dashboard']}>
+            <Routes>
+              <Route
+                path="/dashboard"
+                element={
+                  <ProtectedRoute>
+                    <div>Secret Protected Dashboard Content</div>
+                  </ProtectedRoute>
+                }
+              />
+            </Routes>
+          </MemoryRouter>
+        </AuthProvider>
+      </ToastProvider>
+    );
+
+    // Should resolve session from mock /auth/me and render protected content
+    await waitFor(() => {
+      expect(screen.getByText(/Secret Protected Dashboard Content/i)).toBeInTheDocument();
+    });
   });
 });

@@ -1,6 +1,7 @@
 import express, { type Express } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
+import cookieParser from 'cookie-parser';
 import { apiRouter } from './routes/index.js';
 import { errorHandler, notFoundHandler } from './middlewares/error.middleware.js';
 import { env } from './config/env.js';
@@ -26,9 +27,10 @@ export function createApp(): Express {
     })
   );
 
-  // Body Parsing
+  // Body & Cookie Parsing
   app.use(express.json({ limit: '10mb' }));
   app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+  app.use(cookieParser());
 
   // Root welcome ping
   app.get('/', (_req, res) => {
