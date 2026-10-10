@@ -1,8 +1,32 @@
 import { Router } from 'express';
 import { healthRouter } from './health.routes.js';
 import { authRouter } from './auth.routes.js';
+import { profileRouter } from './profile.routes.js';
+import { accountRouter } from './account.routes.js';
+import { transactionRouter } from './transaction.routes.js';
+import { categoryRouter } from './category.routes.js';
+import { budgetRouter } from './budget.routes.js';
+import { goalRouter } from './goal.routes.js';
+import { recurringRouter } from './recurring.routes.js';
+import { analyticsRouter } from './analytics.routes.js';
+import { reportsRouter } from './reports.routes.js';
+import { notificationRouter } from './notification.routes.js';
+import { householdRouter } from './household.routes.js';
+import { aiRouter } from './ai.routes.js';
 
 export const apiRouter = Router();
 
 apiRouter.use('/health', healthRouter);
 apiRouter.use('/auth', authRouter);
+apiRouter.use('/profile', profileRouter);
+apiRouter.use('/accounts', accountRouter);
+apiRouter.use('/transactions', transactionRouter);
+apiRouter.use('/categories', categoryRouter);
+apiRouter.use('/budgets', budgetRouter);
+apiRouter.use('/goals', goalRouter);
+apiRouter.use('/recurring', recurringRouter);
+apiRouter.use('/analytics', analyticsRouter);
+apiRouter.use('/reports', reportsRouter);
+apiRouter.use('/notifications', notificationRouter);
+apiRouter.use('/households', householdRouter);
+apiRouter.use('/ai', aiRouter);

@@ -3,8 +3,14 @@ import cors from 'cors';
 import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
 import { apiRouter } from './routes/index.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { errorHandler, notFoundHandler } from './middlewares/error.middleware.js';
 import { env } from './config/env.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 export function createApp(): Express {
   const app = express();
@@ -40,6 +46,18 @@ export function createApp(): Express {
       docs: '/api/docs',
       health: '/api/health'
     });
+  });
+
+  // OpenAPI Documentation endpoint
+  app.get('/api/docs', (_req, res) => {
+    try {
+      const openApiSpec = JSON.parse(
+        fs.readFileSync(path.resolve(__dirname, 'docs', 'openapi.json'), 'utf-8')
+      );
+      res.json(openApiSpec);
+    } catch {
+      res.status(500).json({ error: 'OpenAPI documentation unavailable' });
+    }
   });
 
   // Mount API endpoints

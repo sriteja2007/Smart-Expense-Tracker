@@ -116,3 +116,38 @@ export function formatCurrency(
     return `${config.symbol}${amount.toFixed(config.decimalDigits)}`;
   }
 }
+
+/**
+ * Convert standard decimal amount to integer minor units (e.g. ₹10.50 -> 1050 paise)
+ */
+export function toMinorUnits(
+  amount: number,
+  currency: CurrencyCode = DEFAULT_CURRENCY
+): number {
+  const config = SUPPORTED_CURRENCIES[currency] || SUPPORTED_CURRENCIES.INR;
+  const multiplier = Math.pow(10, config.decimalDigits);
+  return Math.round(amount * multiplier);
+}
+
+/**
+ * Convert integer minor units back to standard decimal amount (e.g. 1050 paise -> ₹10.50)
+ */
+export function fromMinorUnits(
+  minorUnits: number,
+  currency: CurrencyCode = DEFAULT_CURRENCY
+): number {
+  const config = SUPPORTED_CURRENCIES[currency] || SUPPORTED_CURRENCIES.INR;
+  const divisor = Math.pow(10, config.decimalDigits);
+  return minorUnits / divisor;
+}
+
+/**
+ * Format integer minor units directly into a localized currency string.
+ */
+export function formatMinorUnits(
+  minorUnits: number,
+  currency: CurrencyCode = DEFAULT_CURRENCY
+): string {
+  const decimalAmount = fromMinorUnits(minorUnits, currency);
+  return formatCurrency(decimalAmount, currency);
+}

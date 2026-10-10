@@ -1,0 +1,301 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "LumaSpend Financial API",
+    "version": "1.0.0",
+    "description": "Production-grade REST API for LumaSpend - 3D Smart Expense Tracker. Stores amounts in integer minor units (paise/cents), enforces strict multi-tenant authorization, atomic transfers, and role-based shared finances."
+  },
+  "servers": [
+    {
+      "url": "http://localhost:5000",
+      "description": "Local Development Server"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "cookieAuth": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "token"
+      },
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      }
+    },
+    "schemas": {
+      "CurrencyCode": {
+        "type": "string",
+        "enum": ["INR", "USD", "EUR", "GBP", "JPY", "AED", "CAD", "AUD", "SGD"],
+        "default": "INR"
+      },
+      "AccountType": {
+        "type": "string",
+        "enum": ["checking", "savings", "credit_card", "upi_wallet", "cash", "investment", "other"]
+      },
+      "FinancialAccount": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "userId": { "type": "string" },
+          "householdId": { "type": "string" },
+          "name": { "type": "string" },
+          "type": { "$ref": "#/components/schemas/AccountType" },
+          "currency": { "$ref": "#/components/schemas/CurrencyCode" },
+          "balanceMinorUnits": { "type": "integer", "description": "Account balance in integer minor units (e.g. 50000 paise = ₹500.00)" },
+          "accountNumberMask": { "type": "string" },
+          "institutionName": { "type": "string" },
+          "color": { "type": "string" },
+          "icon": { "type": "string" },
+          "isArchived": { "type": "boolean" },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "updatedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "CreateAccountInput": {
+        "type": "object",
+        "required": ["name", "type"],
+        "properties": {
+          "name": { "type": "string", "maxLength": 50 },
+          "type": { "$ref": "#/components/schemas/AccountType" },
+          "currency": { "$ref": "#/components/schemas/CurrencyCode" },
+          "initialBalanceMinorUnits": { "type": "integer", "default": 0 },
+          "accountNumberMask": { "type": "string", "maxLength": 10 },
+          "institutionName": { "type": "string", "maxLength": 50 },
+          "color": { "type": "string" },
+          "icon": { "type": "string" },
+          "householdId": { "type": "string" }
+        }
+      },
+      "Transaction": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "userId": { "type": "string" },
+          "householdId": { "type": "string" },
+          "type": { "type": "string", "enum": ["income", "expense", "transfer"] },
+          "amountMinorUnits": { "type": "integer", "description": "Positive integer amount in minor units (paise)" },
+          "currency": { "$ref": "#/components/schemas/CurrencyCode" },
+          "sourceAccountId": { "type": "string" },
+          "destinationAccountId": { "type": "string" },
+          "categoryId": { "type": "string" },
+          "description": { "type": "string" },
+          "merchantName": { "type": "string" },
+          "dateUtc": { "type": "string", "format": "date-time" },
+          "paymentMethod": { "type": "string", "enum": ["upi", "credit_card", "debit_card", "net_banking", "cash", "wallet", "other"] },
+          "status": { "type": "string", "enum": ["completed", "pending", "cancelled"] },
+          "isRecurring": { "type": "boolean" },
+          "tags": { "type": "array", "items": { "type": "string" } },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "updatedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "CreateTransactionInput": {
+        "type": "object",
+        "required": ["type", "amountMinorUnits", "sourceAccountId", "description"],
+        "properties": {
+          "type": { "type": "string", "enum": ["income", "expense", "transfer"] },
+          "amountMinorUnits": { "type": "integer", "minimum": 1 },
+          "currency": { "$ref": "#/components/schemas/CurrencyCode" },
+          "sourceAccountId": { "type": "string" },
+          "destinationAccountId": { "type": "string" },
+          "categoryId": { "type": "string" },
+          "description": { "type": "string", "maxLength": 150 },
+          "merchantName": { "type": "string", "maxLength": 60 },
+          "dateUtc": { "type": "string", "format": "date-time" },
+          "paymentMethod": { "type": "string", "enum": ["upi", "credit_card", "debit_card", "net_banking", "cash", "wallet", "other"] },
+          "tags": { "type": "array", "items": { "type": "string" } },
+          "householdId": { "type": "string" }
+        }
+      },
+      "Budget": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "userId": { "type": "string" },
+          "householdId": { "type": "string" },
+          "categoryId": { "type": "string" },
+          "periodMonth": { "type": "integer", "minimum": 1, "maximum": 12 },
+          "periodYear": { "type": "integer" },
+          "limitAmountMinorUnits": { "type": "integer" },
+          "spentAmountMinorUnits": { "type": "integer" },
+          "currency": { "$ref": "#/components/schemas/CurrencyCode" },
+          "alertThresholdPct": { "type": "integer", "minimum": 1, "maximum": 100 }
+        }
+      },
+      "SavingsGoal": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "userId": { "type": "string" },
+          "name": { "type": "string" },
+          "targetAmountMinorUnits": { "type": "integer" },
+          "currentAmountMinorUnits": { "type": "integer" },
+          "currency": { "$ref": "#/components/schemas/CurrencyCode" },
+          "status": { "type": "string", "enum": ["active", "completed", "paused", "archived"] }
+        }
+      },
+      "Household": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "ownerId": { "type": "string" },
+          "currency": { "$ref": "#/components/schemas/CurrencyCode" },
+          "members": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "userId": { "type": "string" },
+                "email": { "type": "string" },
+                "displayName": { "type": "string" },
+                "role": { "type": "string", "enum": ["owner", "admin", "member", "viewer"] },
+                "joinedAt": { "type": "string", "format": "date-time" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/api/health": {
+      "get": {
+        "summary": "API & DB health check",
+        "responses": {
+          "200": { "description": "Service is healthy" }
+        }
+      }
+    },
+    "/api/auth/register": {
+      "post": {
+        "summary": "Register a new local user",
+        "responses": {
+          "201": { "description": "User created and authenticated" }
+        }
+      }
+    },
+    "/api/auth/login": {
+      "post": {
+        "summary": "Log in with email & password",
+        "responses": {
+          "200": { "description": "Authenticated successfully" }
+        }
+      }
+    },
+    "/api/auth/me": {
+      "get": {
+        "summary": "Get authenticated user session",
+        "security": [{ "cookieAuth": [] }, { "bearerAuth": [] }],
+        "responses": {
+          "200": { "description": "Session active" },
+          "401": { "description": "Unauthorized" }
+        }
+      }
+    },
+    "/api/accounts": {
+      "get": {
+        "summary": "List financial accounts",
+        "security": [{ "cookieAuth": [] }, { "bearerAuth": [] }],
+        "responses": {
+          "200": { "description": "List of user accounts" }
+        }
+      },
+      "post": {
+        "summary": "Create a new financial account",
+        "security": [{ "cookieAuth": [] }, { "bearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CreateAccountInput" }
+            }
+          }
+        },
+        "responses": {
+          "201": { "description": "Account created" }
+        }
+      }
+    },
+    "/api/transactions": {
+      "get": {
+        "summary": "List transactions with pagination, filters, and search",
+        "security": [{ "cookieAuth": [] }, { "bearerAuth": [] }],
+        "responses": {
+          "200": { "description": "Paginated transaction list" }
+        }
+      },
+      "post": {
+        "summary": "Record a new transaction (income, expense, transfer)",
+        "security": [{ "cookieAuth": [] }, { "bearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CreateTransactionInput" }
+            }
+          }
+        },
+        "responses": {
+          "201": { "description": "Transaction recorded and account balance adjusted" }
+        }
+      }
+    },
+    "/api/categories": {
+      "get": {
+        "summary": "List system categories and custom user categories",
+        "security": [{ "cookieAuth": [] }, { "bearerAuth": [] }],
+        "responses": {
+          "200": { "description": "Categories list" }
+        }
+      }
+    },
+    "/api/budgets": {
+      "get": {
+        "summary": "List budgets for period with spent calculations",
+        "security": [{ "cookieAuth": [] }, { "bearerAuth": [] }],
+        "responses": {
+          "200": { "description": "Budgets list" }
+        }
+      }
+    },
+    "/api/goals": {
+      "get": {
+        "summary": "List savings goals",
+        "security": [{ "cookieAuth": [] }, { "bearerAuth": [] }],
+        "responses": {
+          "200": { "description": "Goals list" }
+        }
+      }
+    },
+    "/api/analytics/summary": {
+      "get": {
+        "summary": "Get executive financial KPIs (total balance, monthly income, expense, net savings in minor units)",
+        "security": [{ "cookieAuth": [] }, { "bearerAuth": [] }],
+        "responses": {
+          "200": { "description": "Summary KPIs" }
+        }
+      }
+    },
+    "/api/reports/export-csv": {
+      "get": {
+        "summary": "Export user transactions as CSV format",
+        "security": [{ "cookieAuth": [] }, { "bearerAuth": [] }],
+        "responses": {
+          "200": { "description": "CSV stream file" }
+        }
+      }
+    },
+    "/api/households": {
+      "get": {
+        "summary": "List shared budget households",
+        "security": [{ "cookieAuth": [] }, { "bearerAuth": [] }],
+        "responses": {
+          "200": { "description": "Households list" }
+        }
+      }
+    }
+  }
+}

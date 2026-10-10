@@ -35,8 +35,9 @@ export function errorHandler(
   }
 
   // 2. Zod Schema Validation Errors
-  if (err instanceof ZodError) {
-    const details: ApiErrorDetail[] = err.issues.map((issue) => ({
+  if (err instanceof ZodError || (err as any)?.name === 'ZodError') {
+    const zodErr = err as ZodError;
+    const details: ApiErrorDetail[] = (zodErr.issues || []).map((issue) => ({
       field: issue.path.join('.'),
       message: issue.message,
       code: issue.code
@@ -48,12 +49,12 @@ export function errorHandler(
         code: ERROR_CODES.VALIDATION_ERROR,
         message: 'Request payload validation failed',
         details,
-        ...(env.NODE_ENV === 'development' && { stack: err.stack })
+        ...(env.NODE_ENV === 'development' && { stack: zodErr.stack })
       },
       timestamp
     };
 
-    res.status(HTTP_STATUS.UNPROCESSABLE_ENTITY).json(responsePayload);
+    res.status(HTTP_STATUS.BAD_REQUEST).json(responsePayload);
     return;
   }
 
