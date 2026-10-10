@@ -9,12 +9,13 @@ export class ApiClient {
     const url = `${this.baseUrl}${endpoint.startsWith('/') ? endpoint : `/${endpoint}`}`;
 
     const headers = new Headers(options.headers || {});
-    if (!headers.has('Content-Type')) {
+    if (!headers.has('Content-Type') && !(options.body instanceof FormData)) {
       headers.set('Content-Type', 'application/json');
     }
 
     try {
       const response = await fetch(url, {
+        credentials: 'include',
         ...options,
         headers
       });
@@ -31,6 +32,20 @@ export class ApiClient {
         timestamp: new Date().toISOString()
       };
     }
+  }
+
+  static async downloadText(endpoint: string): Promise<string> {
+    const url = `${this.baseUrl}${endpoint.startsWith('/') ? endpoint : `/${endpoint}`}`;
+    const response = await fetch(url, {
+      credentials: 'include',
+      headers: {
+        Accept: 'text/csv, text/plain, */*'
+      }
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to download: ${response.statusText}`);
+    }
+    return response.text();
   }
 
   static async getHealth(): Promise<ApiResponse<HealthCheckData>> {

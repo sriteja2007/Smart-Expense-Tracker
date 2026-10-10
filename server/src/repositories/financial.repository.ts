@@ -8,7 +8,7 @@ import { Recurring } from '../models/recurring.model.js';
 import { HouseholdModel } from '../models/household.model.js';
 import { NotificationModel } from '../models/notification.model.js';
 import { AiConversationModel } from '../models/ai-conversation.model.js';
-import { AppError } from '@lumaspend/shared';
+import { AppError, toMinorUnits, formatMinorUnits } from '@lumaspend/shared';
 import type {
   FinancialAccount,
   FinancialCategory,
@@ -16,19 +16,25 @@ import type {
   Budget,
   SavingsGoal,
   RecurringSchedule,
+  RecurringFrequency,
   Household,
   HouseholdRole,
   Notification,
   AiConversation,
   TransactionQueryInput,
   CreateTransactionInput,
+  UpdateTransactionInput,
   CreateAccountInput,
   CreateBudgetInput,
   CreateGoalInput,
   CreateRecurringInput,
   CreateHouseholdInput,
   InviteMemberInput,
-  CreateAiConversationInput
+  CreateAiConversationInput,
+  CsvImportRow,
+  CsvImportPreviewResult,
+  CsvImportPreviewInput,
+  CsvImportConfirmInput
 } from '@lumaspend/shared';
 
 // Default system categories
@@ -276,12 +282,23 @@ export class FinancialRepository {
 
   static async deleteCategory(id: string, userId: string): Promise<boolean> {
     if (this.isDbConnected()) {
+      const referenced = await TransactionModel.exists({ categoryId: id, userId }).exec();
+      if (referenced) {
+        throw AppError.conflict('Cannot delete category: existing transactions reference this category. Archive it instead.');
+      }
       const res = await Category.deleteOne({ _id: id, userId, isSystem: false }).exec();
       return (res.deletedCount || 0) > 0;
     }
 
     const cat = memoryCategories.get(id);
     if (!cat || cat.isSystem || cat.userId !== userId) return false;
+
+    for (const t of memoryTransactions.values()) {
+      if (t.categoryId === id && t.userId === userId) {
+        throw AppError.conflict('Cannot delete category: existing transactions reference this category. Archive it instead.');
+      }
+    }
+
     memoryCategories.delete(id);
     return true;
   }
@@ -337,6 +354,7 @@ export class FinancialRepository {
         categoryId: input.categoryId,
         description: input.description,
         merchantName: input.merchantName,
+        notes: input.notes,
         dateUtc: new Date(input.dateUtc),
         paymentMethod: input.paymentMethod,
         status: 'completed',
@@ -359,6 +377,7 @@ export class FinancialRepository {
       categoryId: input.categoryId,
       description: input.description,
       merchantName: input.merchantName,
+      notes: input.notes,
       dateUtc: input.dateUtc,
       paymentMethod: input.paymentMethod,
       status: 'completed',
@@ -460,6 +479,100 @@ export class FinancialRepository {
     const t = memoryTransactions.get(id);
     if (!t || t.userId !== userId) return null;
     return t;
+  }
+
+  static async updateTransaction(
+    id: string,
+    userId: string,
+    updates: UpdateTransactionInput
+  ): Promise<Transaction | null> {
+    const existing = await this.getTransactionById(id, userId);
+    if (!existing) return null;
+
+    const newSourceAccountId = updates.sourceAccountId || existing.sourceAccountId;
+    const newDestAccountId =
+      updates.destinationAccountId !== undefined ? updates.destinationAccountId : existing.destinationAccountId;
+    const newType = updates.type || existing.type;
+    const newAmount =
+      updates.amountMinorUnits !== undefined ? updates.amountMinorUnits : existing.amountMinorUnits;
+
+    // Verify source account belongs to user
+    const sourceAcc = await this.getAccountById(newSourceAccountId, userId);
+    if (!sourceAcc) {
+      throw AppError.notFound('Source account not found or access denied.');
+    }
+
+    if (newType === 'transfer') {
+      if (!newDestAccountId) {
+        throw AppError.badRequest('Destination account is required for transfer.');
+      }
+      const destAcc = await this.getAccountById(newDestAccountId, userId);
+      if (!destAcc) {
+        throw AppError.notFound('Destination account not found or access denied.');
+      }
+      if (newSourceAccountId === newDestAccountId) {
+        throw AppError.badRequest('Source and destination accounts must be different.');
+      }
+    }
+
+    // 1. Revert old transaction balance impact
+    if (existing.type === 'expense') {
+      await this.adjustAccountBalance(existing.sourceAccountId, existing.amountMinorUnits);
+    } else if (existing.type === 'income') {
+      await this.adjustAccountBalance(existing.sourceAccountId, -existing.amountMinorUnits);
+    } else if (existing.type === 'transfer' && existing.destinationAccountId) {
+      await this.adjustAccountBalance(existing.sourceAccountId, existing.amountMinorUnits);
+      await this.adjustAccountBalance(existing.destinationAccountId, -existing.amountMinorUnits);
+    }
+
+    // 2. Apply new transaction balance impact
+    if (newType === 'expense') {
+      await this.adjustAccountBalance(newSourceAccountId, -newAmount);
+    } else if (newType === 'income') {
+      await this.adjustAccountBalance(newSourceAccountId, newAmount);
+    } else if (newType === 'transfer' && newDestAccountId) {
+      await this.adjustAccountBalance(newSourceAccountId, -newAmount);
+      await this.adjustAccountBalance(newDestAccountId, newAmount);
+    }
+
+    // 3. Persist updates
+    if (this.isDbConnected()) {
+      const doc = await TransactionModel.findOne({ _id: id, userId }).exec();
+      if (!doc) return null;
+
+      if (updates.type) doc.type = updates.type;
+      if (updates.amountMinorUnits !== undefined) doc.amountMinorUnits = updates.amountMinorUnits;
+      if (updates.sourceAccountId) doc.sourceAccountId = updates.sourceAccountId;
+      if (updates.destinationAccountId !== undefined) doc.destinationAccountId = updates.destinationAccountId;
+      if (updates.categoryId !== undefined) doc.categoryId = updates.categoryId;
+      if (updates.description) doc.description = updates.description;
+      if (updates.merchantName !== undefined) doc.merchantName = updates.merchantName;
+      if (updates.notes !== undefined) (doc as any).notes = updates.notes;
+      if (updates.dateUtc) doc.dateUtc = new Date(updates.dateUtc);
+      if (updates.paymentMethod) doc.paymentMethod = updates.paymentMethod;
+      if (updates.tags) doc.tags = updates.tags;
+
+      await doc.save();
+      return doc.toTransaction();
+    }
+
+    const updated: Transaction = {
+      ...existing,
+      type: newType,
+      amountMinorUnits: newAmount,
+      sourceAccountId: newSourceAccountId,
+      destinationAccountId: newDestAccountId,
+      categoryId: updates.categoryId !== undefined ? updates.categoryId : existing.categoryId,
+      description: updates.description || existing.description,
+      merchantName: updates.merchantName !== undefined ? updates.merchantName : existing.merchantName,
+      notes: updates.notes !== undefined ? updates.notes : existing.notes,
+      dateUtc: updates.dateUtc || existing.dateUtc,
+      paymentMethod: updates.paymentMethod || existing.paymentMethod,
+      tags: updates.tags || existing.tags,
+      updatedAt: new Date().toISOString()
+    };
+    memoryTransactions.set(id, updated);
+    return updated;
   }
 
   static async deleteTransaction(id: string, userId: string): Promise<boolean> {
@@ -880,6 +993,374 @@ export class FinancialRepository {
     if (!r || r.userId !== userId) return false;
     memoryRecurring.delete(id);
     return true;
+  }
+
+  static async getRecurringById(id: string, userId: string): Promise<RecurringSchedule | null> {
+    if (this.isDbConnected()) {
+      const doc = await Recurring.findById(id).exec();
+      if (!doc || doc.userId !== userId) return null;
+      return doc.toSchedule();
+    }
+    const r = memoryRecurring.get(id);
+    if (!r || r.userId !== userId) return null;
+    return r;
+  }
+
+  static async updateRecurring(
+    id: string,
+    userId: string,
+    updates: Partial<RecurringSchedule>
+  ): Promise<RecurringSchedule | null> {
+    if (this.isDbConnected()) {
+      const doc = await Recurring.findOne({ _id: id, userId }).exec();
+      if (!doc) return null;
+      if (updates.isActive !== undefined) doc.isActive = updates.isActive;
+      if (updates.amountMinorUnits !== undefined) doc.amountMinorUnits = updates.amountMinorUnits;
+      if (updates.frequency) doc.frequency = updates.frequency;
+      if (updates.description) doc.description = updates.description;
+      if (updates.endDateUtc) doc.endDateUtc = new Date(updates.endDateUtc);
+      if (updates.nextRunDateUtc) doc.nextRunDateUtc = new Date(updates.nextRunDateUtc);
+      await doc.save();
+      return doc.toSchedule();
+    }
+    const r = memoryRecurring.get(id);
+    if (!r || r.userId !== userId) return null;
+    const updated: RecurringSchedule = {
+      ...r,
+      ...updates,
+      updatedAt: new Date().toISOString()
+    };
+    memoryRecurring.set(id, updated);
+    return updated;
+  }
+
+  static calculateNextRunDate(
+    startDate: Date,
+    currentRunDate: Date,
+    frequency: RecurringFrequency
+  ): Date {
+    const next = new Date(currentRunDate.getTime());
+    const origDay = startDate.getUTCDate();
+
+    if (frequency === 'daily') {
+      next.setUTCDate(next.getUTCDate() + 1);
+    } else if (frequency === 'weekly') {
+      next.setUTCDate(next.getUTCDate() + 7);
+    } else if (frequency === 'biweekly') {
+      next.setUTCDate(next.getUTCDate() + 14);
+    } else if (frequency === 'monthly') {
+      let targetYear = next.getUTCFullYear();
+      let targetMonth = next.getUTCMonth() + 1;
+      if (targetMonth > 11) {
+        targetMonth = 0;
+        targetYear += 1;
+      }
+      const daysInTargetMonth = new Date(Date.UTC(targetYear, targetMonth + 1, 0)).getUTCDate();
+      const clampedDay = Math.min(origDay, daysInTargetMonth);
+      next.setUTCDate(1);
+      next.setUTCFullYear(targetYear);
+      next.setUTCMonth(targetMonth);
+      next.setUTCDate(clampedDay);
+    } else if (frequency === 'yearly') {
+      const targetYear = next.getUTCFullYear() + 1;
+      const targetMonth = startDate.getUTCMonth();
+      const daysInTargetMonth = new Date(Date.UTC(targetYear, targetMonth + 1, 0)).getUTCDate();
+      const clampedDay = Math.min(origDay, daysInTargetMonth);
+      next.setUTCDate(1);
+      next.setUTCFullYear(targetYear);
+      next.setUTCMonth(targetMonth);
+      next.setUTCDate(clampedDay);
+    }
+
+    return next;
+  }
+
+  static async processDueRecurring(userId: string): Promise<{
+    processedCount: number;
+    transactions: Transaction[];
+  }> {
+    const now = new Date();
+    const processedTransactions: Transaction[] = [];
+
+    const rules = await this.listRecurring(userId);
+    const dueRules = rules.filter((r) => r.isActive && new Date(r.nextRunDateUtc) <= now);
+
+    for (const rule of dueRules) {
+      const currentRunDate = new Date(rule.nextRunDateUtc);
+      const cycleKey = currentRunDate.toISOString().slice(0, 10);
+
+      const existing = await this.listTransactions(userId, { limit: 100 });
+      const alreadyPosted = existing.transactions.some(
+        (t) => t.recurringRuleId === rule.id && t.dateUtc.slice(0, 10) === cycleKey
+      );
+
+      if (!alreadyPosted) {
+        const txn = await this.createTransaction(userId, {
+          type: rule.type,
+          amountMinorUnits: rule.amountMinorUnits,
+          currency: rule.currency,
+          sourceAccountId: rule.sourceAccountId,
+          destinationAccountId: rule.destinationAccountId,
+          categoryId: rule.categoryId,
+          description: `${rule.description} (Recurring)`,
+          merchantName: rule.merchantName,
+          dateUtc: currentRunDate.toISOString(),
+          paymentMethod: 'other',
+          tags: ['recurring']
+        });
+
+        if (this.isDbConnected()) {
+          await TransactionModel.updateOne({ _id: txn.id }, { isRecurring: true, recurringRuleId: rule.id }).exec();
+        } else {
+          const memTx = memoryTransactions.get(txn.id);
+          if (memTx) {
+            memTx.isRecurring = true;
+            memTx.recurringRuleId = rule.id;
+            memoryTransactions.set(txn.id, memTx);
+          }
+        }
+        processedTransactions.push({ ...txn, isRecurring: true, recurringRuleId: rule.id });
+      }
+
+      const nextRun = this.calculateNextRunDate(new Date(rule.startDateUtc), currentRunDate, rule.frequency);
+      const isPastEnd = rule.endDateUtc && nextRun > new Date(rule.endDateUtc);
+
+      await this.updateRecurring(rule.id, userId, {
+        nextRunDateUtc: nextRun.toISOString(),
+        lastRunDateUtc: now.toISOString(),
+        isActive: !isPastEnd
+      });
+    }
+
+    return {
+      processedCount: processedTransactions.length,
+      transactions: processedTransactions
+    };
+  }
+
+  // ==========================================
+  // CSV Import
+  // ==========================================
+  static parseCsv(csvString: string): string[][] {
+    const rows: string[][] = [];
+    let currentRow: string[] = [];
+    let currentField = '';
+    let insideQuote = false;
+
+    const normalized = csvString.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+    for (let i = 0; i < normalized.length; i++) {
+      const char = normalized[i];
+      const nextChar = normalized[i + 1];
+
+      if (char === '"') {
+        if (insideQuote && nextChar === '"') {
+          currentField += '"';
+          i++;
+        } else {
+          insideQuote = !insideQuote;
+        }
+      } else if (char === ',' && !insideQuote) {
+        currentRow.push(currentField.trim());
+        currentField = '';
+      } else if (char === '\n' && !insideQuote) {
+        currentRow.push(currentField.trim());
+        if (currentRow.some((f) => f.length > 0)) {
+          rows.push(currentRow);
+        }
+        currentRow = [];
+        currentField = '';
+      } else {
+        currentField += char;
+      }
+    }
+
+    if (currentField.length > 0 || currentRow.length > 0) {
+      currentRow.push(currentField.trim());
+      if (currentRow.some((f) => f.length > 0)) {
+        rows.push(currentRow);
+      }
+    }
+
+    return rows;
+  }
+
+  static async previewCsvImport(
+    userId: string,
+    input: CsvImportPreviewInput
+  ): Promise<CsvImportPreviewResult> {
+    const rawRows = this.parseCsv(input.csvContent);
+    if (rawRows.length < 2) {
+      throw AppError.badRequest('CSV must contain at least a header row and one data row.');
+    }
+
+    const maxRows = 500;
+    if (rawRows.length - 1 > maxRows) {
+      throw AppError.badRequest(`CSV exceeds maximum limit of ${maxRows} rows.`);
+    }
+
+    const firstRow = rawRows[0];
+    if (!firstRow) {
+      throw AppError.badRequest('CSV header row is missing.');
+    }
+
+    const header = firstRow.map((h) => h.toLowerCase());
+    const findCol = (keywords: string[]) =>
+      header.findIndex((h) => keywords.some((k) => h.includes(k)));
+
+    const dateCol = findCol(['date', 'time', 'day']);
+    const typeCol = findCol(['type']);
+    const amountCol = findCol(['amount', 'sum', 'total', 'price', 'inr']);
+    const descCol = findCol(['description', 'desc', 'title', 'narrative', 'details', 'memo']);
+    const catCol = findCol(['category', 'tag']);
+    const merchantCol = findCol(['merchant', 'payee', 'vendor', 'store']);
+    const notesCol = findCol(['note', 'comment', 'remark']);
+
+    const [existingTxns, categories] = await Promise.all([
+      this.listTransactions(userId, { limit: 1000 }),
+      this.listCategories(userId)
+    ]);
+
+    const catMap = new Map(categories.map((c) => [c.name.toLowerCase(), c.id]));
+
+    const parsedRows: CsvImportRow[] = [];
+    let validCount = 0;
+    let invalidCount = 0;
+    let duplicateCount = 0;
+
+    for (let i = 1; i < rawRows.length; i++) {
+      const row = rawRows[i];
+      if (!row) continue;
+      const getCell = (colIdx: number): string => (colIdx >= 0 && row[colIdx] ? row[colIdx]! : '');
+
+      const errors: string[] = [];
+
+      // 1. Parse Date
+      const rawDate = getCell(dateCol);
+      let parsedDate: Date | null = null;
+      if (rawDate) {
+        const d = new Date(rawDate);
+        if (!isNaN(d.getTime())) {
+          parsedDate = d;
+        } else {
+          errors.push(`Invalid date format: "${rawDate}"`);
+        }
+      } else {
+        parsedDate = new Date();
+      }
+
+      // 2. Parse Amount
+      const rawAmount = getCell(amountCol).replace(/[^\d.-]/g, '');
+      let amountMinorUnits = 0;
+      const numAmount = parseFloat(rawAmount || '0');
+      if (isNaN(numAmount) || numAmount <= 0) {
+        errors.push(`Amount must be a positive number: "${getCell(amountCol)}"`);
+      } else {
+        amountMinorUnits = toMinorUnits(numAmount, 'INR');
+      }
+
+      // 3. Parse Type
+      const rawType = getCell(typeCol).toLowerCase();
+      let type: 'income' | 'expense' | 'transfer' = 'expense';
+      if (rawType.includes('inc') || rawType.includes('credit') || rawType.includes('deposit')) {
+        type = 'income';
+      } else if (rawType.includes('trans') || rawType.includes('sweep')) {
+        type = 'transfer';
+      }
+
+      // 4. Parse Description
+      const description = getCell(descCol).trim();
+      if (!description) {
+        errors.push('Description cannot be empty');
+      }
+
+      const rawCategory = getCell(catCol).trim() || undefined;
+      const matchedCatId = rawCategory ? catMap.get(rawCategory.toLowerCase()) : undefined;
+
+      const merchantName = getCell(merchantCol).trim() || undefined;
+      const notes = getCell(notesCol).trim() || undefined;
+
+      const isValid = errors.length === 0;
+
+      let isDuplicate = false;
+      let duplicateReason: string | undefined;
+
+      if (isValid && parsedDate) {
+        const dateStr = parsedDate.toISOString().slice(0, 10);
+        const dupMatch = existingTxns.transactions.find((t) => {
+          const tDate = t.dateUtc.slice(0, 10);
+          const sameAmount = t.amountMinorUnits === amountMinorUnits;
+          const sameDate = tDate === dateStr;
+          const sameDesc = t.description.toLowerCase() === description.toLowerCase();
+          return sameDate && sameAmount && sameDesc;
+        });
+
+        if (dupMatch) {
+          isDuplicate = true;
+          duplicateReason = `Matches existing transaction on ${dateStr} for ${formatMinorUnits(amountMinorUnits)}`;
+          duplicateCount++;
+        }
+      }
+
+      if (isValid) validCount++;
+      else invalidCount++;
+
+      parsedRows.push({
+        rowNumber: i,
+        dateUtc: parsedDate ? parsedDate.toISOString() : new Date().toISOString(),
+        type,
+        amountMinorUnits,
+        description: description || 'Untitled Transaction',
+        categoryName: rawCategory,
+        categoryId: matchedCatId,
+        accountId: input.defaultAccountId,
+        merchantName,
+        notes,
+        paymentMethod: 'other',
+        isDuplicate,
+        duplicateReason,
+        isValid,
+        errors
+      });
+    }
+
+    return {
+      totalRows: rawRows.length - 1,
+      validCount,
+      invalidCount,
+      duplicateCount,
+      rows: parsedRows
+    };
+  }
+
+  static async confirmCsvImport(
+    userId: string,
+    rows: CsvImportConfirmInput['rows']
+  ): Promise<{ importedCount: number; transactions: Transaction[] }> {
+    const importedTransactions: Transaction[] = [];
+
+    for (const row of rows) {
+      const txn = await this.createTransaction(userId, {
+        type: row.type,
+        amountMinorUnits: row.amountMinorUnits,
+        currency: 'INR',
+        sourceAccountId: row.sourceAccountId,
+        destinationAccountId: row.destinationAccountId,
+        categoryId: row.categoryId,
+        description: row.description,
+        merchantName: row.merchantName,
+        notes: row.notes,
+        dateUtc: row.dateUtc,
+        paymentMethod: row.paymentMethod,
+        tags: row.tags
+      });
+      importedTransactions.push(txn);
+    }
+
+    return {
+      importedCount: importedTransactions.length,
+      transactions: importedTransactions
+    };
   }
 
   // ==========================================

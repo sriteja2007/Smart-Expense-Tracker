@@ -65,18 +65,20 @@ reportsRouter.get(
     res.setHeader('Content-Disposition', 'attachment; filename="lumaspend-transactions.csv"');
 
     const csvRows = [
-      ['Date', 'Type', 'Description', 'Merchant', 'Amount', 'Currency', 'Payment Method', 'Status'].join(',')
+      ['Date', 'Type', 'Description', 'Merchant', 'Notes', 'Amount', 'Currency', 'Payment Method', 'Status'].join(',')
     ];
 
     for (const t of transactions) {
       const decimalAmount = fromMinorUnits(t.amountMinorUnits, t.currency);
       const safeDesc = `"${(t.description || '').replace(/"/g, '""')}"`;
       const safeMerchant = `"${(t.merchantName || '').replace(/"/g, '""')}"`;
+      const safeNotes = `"${(t.notes || '').replace(/"/g, '""')}"`;
       csvRows.push([
         t.dateUtc,
         t.type,
         safeDesc,
         safeMerchant,
+        safeNotes,
         decimalAmount.toFixed(2),
         t.currency,
         t.paymentMethod,

@@ -243,6 +243,65 @@
         }
       }
     },
+    "/api/transactions/{id}": {
+      "get": {
+        "summary": "Get transaction by ID",
+        "security": [{ "cookieAuth": [] }, { "bearerAuth": [] }],
+        "responses": {
+          "200": { "description": "Transaction details" }
+        }
+      },
+      "patch": {
+        "summary": "Edit transaction details and adjust account balances",
+        "security": [{ "cookieAuth": [] }, { "bearerAuth": [] }],
+        "responses": {
+          "200": { "description": "Transaction updated" }
+        }
+      },
+      "delete": {
+        "summary": "Delete transaction and reverse account balance impact",
+        "security": [{ "cookieAuth": [] }, { "bearerAuth": [] }],
+        "responses": {
+          "200": { "description": "Transaction deleted" }
+        }
+      }
+    },
+    "/api/transactions/import/preview": {
+      "post": {
+        "summary": "Preview CSV import, validate rows, detect duplicates",
+        "security": [{ "cookieAuth": [] }, { "bearerAuth": [] }],
+        "responses": {
+          "200": { "description": "Preview summary and row analysis" }
+        }
+      }
+    },
+    "/api/transactions/import/confirm": {
+      "post": {
+        "summary": "Confirm and persist valid CSV rows atomically",
+        "security": [{ "cookieAuth": [] }, { "bearerAuth": [] }],
+        "responses": {
+          "201": { "description": "Import completed" }
+        }
+      }
+    },
+    "/api/transactions/export-csv": {
+      "get": {
+        "summary": "Export transactions as RFC 4180 CSV",
+        "security": [{ "cookieAuth": [] }, { "bearerAuth": [] }],
+        "responses": {
+          "200": { "description": "CSV stream file" }
+        }
+      }
+    },
+    "/api/recurring/process-due": {
+      "post": {
+        "summary": "Process due recurring transactions idempotently",
+        "security": [{ "cookieAuth": [] }, { "bearerAuth": [] }],
+        "responses": {
+          "200": { "description": "Processed due items" }
+        }
+      }
+    },
     "/api/categories": {
       "get": {
         "summary": "List system categories and custom user categories",

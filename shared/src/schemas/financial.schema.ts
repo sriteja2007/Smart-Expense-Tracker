@@ -53,9 +53,10 @@ export const createTransactionSchema = z.object({
   categoryId: z.string().optional(),
   description: z.string().trim().min(1, 'Description is required').max(150),
   merchantName: z.string().trim().max(60).optional(),
+  notes: z.string().trim().max(500).optional(),
   dateUtc: z.string().datetime({ message: 'dateUtc must be a valid ISO 8601 UTC timestamp' }).default(() => new Date().toISOString()),
   paymentMethod: z.enum(['upi', 'credit_card', 'debit_card', 'net_banking', 'cash', 'wallet', 'other']).default('upi'),
-  tags: z.array(z.string().trim().max(30)).max(10).default([]),
+  tags: z.array(z.string().trim().max(30)).max(10).optional().default([]),
   householdId: z.string().optional()
 }).refine(
   (data) => {
@@ -73,10 +74,14 @@ export const createTransactionSchema = z.object({
 export type CreateTransactionInput = z.infer<typeof createTransactionSchema>;
 
 export const updateTransactionSchema = z.object({
+  type: z.enum(['income', 'expense', 'transfer']).optional(),
   amountMinorUnits: z.number().int().positive().optional(),
+  sourceAccountId: z.string().min(1).optional(),
+  destinationAccountId: z.string().optional(),
   categoryId: z.string().optional(),
   description: z.string().trim().min(1).max(150).optional(),
   merchantName: z.string().trim().max(60).optional(),
+  notes: z.string().trim().max(500).optional(),
   dateUtc: z.string().datetime().optional(),
   paymentMethod: z.enum(['upi', 'credit_card', 'debit_card', 'net_banking', 'cash', 'wallet', 'other']).optional(),
   tags: z.array(z.string().trim().max(30)).max(10).optional()
@@ -166,13 +171,53 @@ export const createRecurringSchema = z.object({
   description: z.string().trim().min(1).max(150),
   merchantName: z.string().trim().max(60).optional(),
   frequency: z.enum(['daily', 'weekly', 'biweekly', 'monthly', 'yearly']),
-  timezone: z.string().trim().default('Asia/Kolkata'),
+  timezone: z.string().trim().optional().default('Asia/Kolkata'),
   startDateUtc: z.string().datetime(),
   endDateUtc: z.string().datetime().optional(),
   householdId: z.string().optional()
 });
 
 export type CreateRecurringInput = z.infer<typeof createRecurringSchema>;
+
+export const updateRecurringSchema = z.object({
+  isActive: z.boolean().optional(),
+  amountMinorUnits: z.number().int().positive().optional(),
+  frequency: z.enum(['daily', 'weekly', 'biweekly', 'monthly', 'yearly']).optional(),
+  description: z.string().trim().min(1).max(150).optional(),
+  endDateUtc: z.string().datetime().optional()
+});
+
+export type UpdateRecurringInput = z.infer<typeof updateRecurringSchema>;
+
+// ==========================================
+// CSV Import Schemas
+// ==========================================
+export const csvImportPreviewSchema = z.object({
+  csvContent: z.string().min(1, 'CSV content is required').max(2 * 1024 * 1024, 'CSV exceeds 2MB limit'),
+  defaultAccountId: z.string().min(1, 'Default account is required')
+});
+
+export type CsvImportPreviewInput = z.infer<typeof csvImportPreviewSchema>;
+
+export const csvImportConfirmSchema = z.object({
+  rows: z.array(
+    z.object({
+      dateUtc: z.string().datetime(),
+      type: z.enum(['income', 'expense', 'transfer']),
+      amountMinorUnits: z.number().int().positive(),
+      sourceAccountId: z.string().min(1),
+      destinationAccountId: z.string().optional(),
+      categoryId: z.string().optional(),
+      description: z.string().min(1).max(150),
+      merchantName: z.string().max(60).optional(),
+      notes: z.string().max(500).optional(),
+      paymentMethod: z.enum(['upi', 'credit_card', 'debit_card', 'net_banking', 'cash', 'wallet', 'other']).default('upi'),
+      tags: z.array(z.string()).default([])
+    })
+  ).min(1, 'At least one transaction is required to import').max(500, 'Maximum 500 rows per import batch')
+});
+
+export type CsvImportConfirmInput = z.infer<typeof csvImportConfirmSchema>;
 
 // ==========================================
 // Household Schemas

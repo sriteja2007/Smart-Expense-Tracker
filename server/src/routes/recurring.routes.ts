@@ -5,6 +5,7 @@ import { asyncHandler } from '../middlewares/async.middleware.js';
 import { FinancialRepository } from '../repositories/financial.repository.js';
 import {
   createRecurringSchema,
+  updateRecurringSchema,
   AppError,
   HttpStatus
 } from '@lumaspend/shared';
@@ -31,6 +32,35 @@ recurringRouter.post(
     const userId = req.user!.id;
     const schedule = await FinancialRepository.createRecurring(userId, req.body);
     res.status(HttpStatus.CREATED).json({ success: true, data: schedule });
+  })
+);
+
+// POST /api/recurring/process-due - Idempotently process due recurring schedules
+recurringRouter.post(
+  '/process-due',
+  asyncHandler(async (req, res) => {
+    const userId = req.user!.id;
+    const result = await FinancialRepository.processDueRecurring(userId);
+    res.status(HttpStatus.OK).json({
+      success: true,
+      message: `Processed ${result.processedCount} due recurring transaction(s).`,
+      data: result
+    });
+  })
+);
+
+// PATCH /api/recurring/:id - Pause, resume, or update recurring schedule
+recurringRouter.patch(
+  '/:id',
+  validateRequest(updateRecurringSchema),
+  asyncHandler(async (req, res) => {
+    const userId = req.user!.id;
+    const id = req.params.id as string;
+    const updated = await FinancialRepository.updateRecurring(id, userId, req.body);
+    if (!updated) {
+      throw AppError.notFound('Recurring schedule not found.');
+    }
+    res.status(HttpStatus.OK).json({ success: true, data: updated });
   })
 );
 

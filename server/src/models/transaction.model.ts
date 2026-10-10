@@ -19,6 +19,7 @@ export interface ITransaction extends Document {
   categoryId?: string;
   description: string;
   merchantName?: string;
+  notes?: string;
   dateUtc: Date;
   paymentMethod: PaymentMethod;
   status: TransactionStatus;
@@ -102,6 +103,10 @@ const TransactionSchema = new Schema<ITransaction>(
       type: String,
       trim: true
     },
+    notes: {
+      type: String,
+      trim: true
+    },
     dateUtc: {
       type: Date,
       required: true,
@@ -154,6 +159,7 @@ TransactionSchema.methods.toTransaction = function (): Transaction {
     categoryId: this.categoryId || undefined,
     description: this.description,
     merchantName: this.merchantName || undefined,
+    notes: this.notes || undefined,
     dateUtc: this.dateUtc.toISOString(),
     paymentMethod: this.paymentMethod as PaymentMethod,
     status: this.status as TransactionStatus,

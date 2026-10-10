@@ -49,6 +49,8 @@ export interface FinancialCategory {
   updatedAt: string;
 }
 
+export type Category = FinancialCategory;
+
 // ==========================================
 // Receipt Metadata
 // ==========================================
@@ -83,6 +85,7 @@ export interface Transaction {
   categoryId?: string;
   description: string;
   merchantName?: string;
+  notes?: string;
   dateUtc: string; // ISO 8601 UTC timestamp
   paymentMethod: PaymentMethod;
   status: TransactionStatus;
@@ -92,6 +95,18 @@ export interface Transaction {
   tags: string[];
   createdAt: string;
   updatedAt: string;
+}
+
+export interface TransactionListResult {
+  transactions: Transaction[];
+  pagination: {
+    page: number;
+    limit: number;
+    totalCount: number;
+    totalPages: number;
+    hasNext: boolean;
+    hasPrev: boolean;
+  };
 }
 
 // ==========================================
@@ -224,4 +239,35 @@ export interface AiConversation {
   isArchived: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+// ==========================================
+// CSV Import Types
+// ==========================================
+export interface CsvImportRow {
+  rowNumber: number;
+  dateUtc: string;
+  type: TransactionType;
+  amountMinorUnits: number;
+  description: string;
+  categoryName?: string;
+  categoryId?: string;
+  accountName?: string;
+  accountId: string;
+  destinationAccountId?: string;
+  merchantName?: string;
+  notes?: string;
+  paymentMethod: PaymentMethod;
+  isDuplicate: boolean;
+  duplicateReason?: string;
+  isValid: boolean;
+  errors: string[];
+}
+
+export interface CsvImportPreviewResult {
+  totalRows: number;
+  validCount: number;
+  invalidCount: number;
+  duplicateCount: number;
+  rows: CsvImportRow[];
 }

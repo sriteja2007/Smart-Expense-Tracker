@@ -459,8 +459,297 @@ describe('Financial Domain Models, REST APIs & Multi-Tenant Isolation Suite', ()
       .set('Cookie', cookies);
     expect(csvRes.status).toBe(200);
     expect(csvRes.headers['content-type']).toContain('text/csv');
-    expect(csvRes.text).toContain('Date,Type,Description,Merchant,Amount,Currency');
+    expect(csvRes.text).toContain('Date,Type,Description,Merchant,Notes,Amount,Currency');
     expect(csvRes.text).toContain('Consulting Retainer');
     expect(csvRes.text).toContain('Office Supplies');
   });
+
+  // ==========================================
+  // Transaction Editing & Balance Recalculation
+  // ==========================================
+  it('PATCH /api/transactions/:id should update transaction and properly adjust account balances', async () => {
+    const { cookies } = await createSession('edit@example.com', 'Editor');
+
+    // Create Account: 100,000 paise
+    const acc = await request(app)
+      .post('/api/accounts')
+      .set('Cookie', cookies)
+      .send({ name: 'Checking', type: 'checking', initialBalanceMinorUnits: 100000 });
+    const accId = acc.body.data.id;
+
+    // Create initial expense of 20,000 paise -> balance should be 80,000
+    const tx = await request(app)
+      .post('/api/transactions')
+      .set('Cookie', cookies)
+      .send({
+        type: 'expense',
+        amountMinorUnits: 20000,
+        sourceAccountId: accId,
+        description: 'Dinner'
+      });
+    const txId = tx.body.data.id;
+
+    const check1 = await request(app).get(`/api/accounts/${accId}`).set('Cookie', cookies);
+    expect(check1.body.data.balanceMinorUnits).toBe(80000);
+
+    // Edit transaction: increase expense to 35,000 paise (additional 15,000 deduction)
+    const patchRes = await request(app)
+      .patch(`/api/transactions/${txId}`)
+      .set('Cookie', cookies)
+      .send({
+        amountMinorUnits: 35000,
+        description: 'Dinner with colleagues',
+        notes: 'Tax invoice saved'
+      });
+    expect(patchRes.status).toBe(200);
+    expect(patchRes.body.data.amountMinorUnits).toBe(35000);
+    expect(patchRes.body.data.notes).toBe('Tax invoice saved');
+
+    // Account balance should now be 65,000 paise (100,000 - 35,000)
+    const check2 = await request(app).get(`/api/accounts/${accId}`).set('Cookie', cookies);
+    expect(check2.body.data.balanceMinorUnits).toBe(65000);
+  });
+
+  // ==========================================
+  // Prevent Unauthorized Cross-Account Transfers
+  // ==========================================
+  it('should prevent transfers to accounts owned by other users', async () => {
+    const userA = await createSession('usera-trans@example.com', 'User A');
+    const userB = await createSession('userb-trans@example.com', 'User B');
+
+    // User A account
+    const accA = await request(app)
+      .post('/api/accounts')
+      .set('Cookie', userA.cookies)
+      .send({ name: 'A Account', type: 'checking', initialBalanceMinorUnits: 50000 });
+    const accAId = accA.body.data.id;
+
+    // User B account
+    const accB = await request(app)
+      .post('/api/accounts')
+      .set('Cookie', userB.cookies)
+      .send({ name: 'B Account', type: 'checking', initialBalanceMinorUnits: 50000 });
+    const accBId = accB.body.data.id;
+
+    // User A attempts to transfer to User B's account -> 404 (or access denied)
+    const transferRes = await request(app)
+      .post('/api/transactions')
+      .set('Cookie', userA.cookies)
+      .send({
+        type: 'transfer',
+        amountMinorUnits: 10000,
+        sourceAccountId: accAId,
+        destinationAccountId: accBId,
+        description: 'Unauthorized transfer'
+      });
+    expect(transferRes.status).toBe(404);
+
+    // Ensure User A balance was NOT modified
+    const accACheck = await request(app).get(`/api/accounts/${accAId}`).set('Cookie', userA.cookies);
+    expect(accACheck.body.data.balanceMinorUnits).toBe(50000);
+  });
+
+  // ==========================================
+  // Category Deletion Protection
+  // ==========================================
+  it('should prevent deleting custom categories that have existing transactions', async () => {
+    const { cookies } = await createSession('cat-protect@example.com', 'Category Tester');
+
+    // Create custom category
+    const catRes = await request(app)
+      .post('/api/categories')
+      .set('Cookie', cookies)
+      .send({ name: 'Freelance Design', type: 'income', icon: 'Brush', color: '#EC4899' });
+    expect(catRes.status).toBe(201);
+    const catId = catRes.body.data.id;
+
+    // Create account
+    const acc = await request(app)
+      .post('/api/accounts')
+      .set('Cookie', cookies)
+      .send({ name: 'Bank', type: 'checking', initialBalanceMinorUnits: 10000 });
+
+    // Create transaction using this category
+    await request(app)
+      .post('/api/transactions')
+      .set('Cookie', cookies)
+      .send({
+        type: 'income',
+        amountMinorUnits: 25000,
+        sourceAccountId: acc.body.data.id,
+        categoryId: catId,
+        description: 'Logo Design Project'
+      });
+
+    // Attempting to delete category should fail with 409 Conflict
+    const delRes = await request(app)
+      .delete(`/api/categories/${catId}`)
+      .set('Cookie', cookies);
+    expect(delRes.status).toBe(409);
+    expect(delRes.body.error.message).toContain('existing transactions reference this category');
+  });
+
+  // ==========================================
+  // CSV Import Validation & Duplicate Detection
+  // ==========================================
+  it('should preview and import CSV files safely with duplicate warnings and error detection', async () => {
+    const { cookies } = await createSession('csv-tester@example.com', 'CSV Tester');
+
+    // Create default account
+    const acc = await request(app)
+      .post('/api/accounts')
+      .set('Cookie', cookies)
+      .send({ name: 'HDFC', type: 'checking', initialBalanceMinorUnits: 50000 });
+    const accId = acc.body.data.id;
+
+    // Pre-seed an existing transaction to test duplicate detection
+    await request(app)
+      .post('/api/transactions')
+      .set('Cookie', cookies)
+      .send({
+        type: 'expense',
+        amountMinorUnits: 15000, // ₹150.00
+        sourceAccountId: accId,
+        description: 'Zepto Groceries',
+        dateUtc: '2026-10-01T12:00:00.000Z'
+      });
+
+    // Prepare CSV with:
+    // Row 1: Valid new transaction
+    // Row 2: Duplicate transaction (same date, amount, description)
+    // Row 3: Invalid row (negative amount)
+    // Row 4: Invalid row (empty description)
+    const csvContent = [
+      'Date,Type,Description,Amount,Category,Notes',
+      '2026-10-02,expense,"Coffee Shop",350.50,Dining,"Espresso & croissant"',
+      '2026-10-01,expense,"Zepto Groceries",150.00,Groceries,"Duplicate item"',
+      '2026-10-03,expense,"Broken Row",-200,Dining,"Bad amount"',
+      '2026-10-04,income,"",500,Salary,"Missing description"'
+    ].join('\n');
+
+    // 1. Preview CSV
+    const previewRes = await request(app)
+      .post('/api/transactions/import/preview')
+      .set('Cookie', cookies)
+      .send({
+        csvContent,
+        defaultAccountId: accId
+      });
+
+    expect(previewRes.status).toBe(200);
+    const preview = previewRes.body.data;
+    expect(preview.totalRows).toBe(4);
+    expect(preview.validCount).toBe(2); // Rows 1 & 2
+    expect(preview.invalidCount).toBe(2); // Rows 3 & 4
+    expect(preview.duplicateCount).toBe(1); // Row 2 matches pre-seeded transaction
+
+    // Verify Row 1
+    expect(preview.rows[0].isValid).toBe(true);
+    expect(preview.rows[0].amountMinorUnits).toBe(35050); // ₹350.50 -> 35050 paise
+    expect(preview.rows[0].isDuplicate).toBe(false);
+
+    // Verify Row 2 (Duplicate detected)
+    expect(preview.rows[1].isValid).toBe(true);
+    expect(preview.rows[1].isDuplicate).toBe(true);
+    expect(preview.rows[1].duplicateReason).toContain('Matches existing transaction');
+
+    // Verify Rows 3 & 4 (Errors captured)
+    expect(preview.rows[2].isValid).toBe(false);
+    expect(preview.rows[2].errors.length).toBeGreaterThan(0);
+    expect(preview.rows[3].isValid).toBe(false);
+
+    // 2. Confirm import with approved valid row (Row 1)
+    const validRow = preview.rows[0];
+    const confirmRes = await request(app)
+      .post('/api/transactions/import/confirm')
+      .set('Cookie', cookies)
+      .send({
+        rows: [
+          {
+            dateUtc: validRow.dateUtc,
+            type: validRow.type,
+            amountMinorUnits: validRow.amountMinorUnits,
+            sourceAccountId: accId,
+            description: validRow.description,
+            notes: validRow.notes,
+            paymentMethod: 'upi',
+            tags: ['csv-import']
+          }
+        ]
+      });
+
+    expect(confirmRes.status).toBe(201);
+    expect(confirmRes.body.data.importedCount).toBe(1);
+
+    // Account balance should have deducted 35,050 paise
+    const accCheck = await request(app).get(`/api/accounts/${accId}`).set('Cookie', cookies);
+    expect(accCheck.body.data.balanceMinorUnits).toBe(50000 - 15000 - 35050);
+  });
+
+  // ==========================================
+  // Recurring Schedules Across Boundaries & Idempotency
+  // ==========================================
+  it('should process recurring schedules across month-end, leap years, and remain idempotent', async () => {
+    const { cookies } = await createSession('recurring-math@example.com', 'Recurring Tester');
+
+    const acc = await request(app)
+      .post('/api/accounts')
+      .set('Cookie', cookies)
+      .send({ name: 'Operating Account', type: 'checking', initialBalanceMinorUnits: 200000 });
+    const accId = acc.body.data.id;
+
+    // Test 1: Month-end date math (Jan 31 -> Feb 28 on non-leap, or Feb 29 on leap year)
+    const jan31 = new Date(Date.UTC(2025, 0, 31)); // Jan 31, 2025 (non-leap)
+    const nextAfterJan31 = FinancialRepository.calculateNextRunDate(jan31, jan31, 'monthly');
+    expect(nextAfterJan31.getUTCFullYear()).toBe(2025);
+    expect(nextAfterJan31.getUTCMonth()).toBe(1); // February
+    expect(nextAfterJan31.getUTCDate()).toBe(28); // Clamped to Feb 28
+
+    // Test 2: Leap year date math (Feb 29, 2024 -> Feb 28, 2025 -> Feb 29, 2028)
+    const feb29Leap = new Date(Date.UTC(2024, 1, 29)); // Feb 29, 2024 (leap year)
+    const next2025 = FinancialRepository.calculateNextRunDate(feb29Leap, feb29Leap, 'yearly');
+    expect(next2025.getUTCFullYear()).toBe(2025);
+    expect(next2025.getUTCMonth()).toBe(1);
+    expect(next2025.getUTCDate()).toBe(28); // Clamped to Feb 28 on non-leap year
+
+    // Test 3: Idempotent execution of process-due
+    // Create recurring rule that is due in the past
+    const pastDate = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const createRecRes = await request(app)
+      .post('/api/recurring')
+      .set('Cookie', cookies)
+      .send({
+        type: 'expense',
+        amountMinorUnits: 12000,
+        sourceAccountId: accId,
+        description: 'Netflix Premium 4K',
+        frequency: 'monthly',
+        startDateUtc: pastDate
+      });
+    expect(createRecRes.status).toBe(201);
+    const ruleId = createRecRes.body.data.id;
+
+    // Trigger process-due first time: creates 1 transaction
+    const process1 = await request(app)
+      .post('/api/recurring/process-due')
+      .set('Cookie', cookies);
+    expect(process1.status).toBe(200);
+    expect(process1.body.data.processedCount).toBe(1);
+
+    // Trigger process-due second time immediately: must NOT create duplicate transactions
+    const process2 = await request(app)
+      .post('/api/recurring/process-due')
+      .set('Cookie', cookies);
+    expect(process2.status).toBe(200);
+    expect(process2.body.data.processedCount).toBe(0); // Idempotent: 0 duplicates
+
+    // Test 4: Pause/resume toggle
+    const pauseRes = await request(app)
+      .patch(`/api/recurring/${ruleId}`)
+      .set('Cookie', cookies)
+      .send({ isActive: false });
+    expect(pauseRes.status).toBe(200);
+    expect(pauseRes.body.data.isActive).toBe(false);
+  });
 });
+

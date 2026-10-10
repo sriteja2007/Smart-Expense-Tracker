@@ -21,6 +21,18 @@ import {
   Zap,
   Globe,
   IndianRupee,
+  Download,
+  Upload,
+  Plus,
+  Trash2,
+  Edit2,
+  Search,
+  Filter,
+  Calendar,
+  Clock,
+  Play,
+  Pause,
+  FileText,
   type LucideProps
 } from 'lucide-react';
 
@@ -63,5 +75,17 @@ export const Icons = {
   Server: createIcon(Server, 'Server'),
   Lightning: createIcon(Zap, 'Lightning Fast'),
   Globe: createIcon(Globe, 'Global'),
-  Rupee: createIcon(IndianRupee, 'Indian Rupee (INR)')
+  Rupee: createIcon(IndianRupee, 'Indian Rupee (INR)'),
+  Download: createIcon(Download, 'Download'),
+  Upload: createIcon(Upload, 'Upload'),
+  Plus: createIcon(Plus, 'Add New'),
+  Trash: createIcon(Trash2, 'Delete'),
+  Edit: createIcon(Edit2, 'Edit'),
+  Search: createIcon(Search, 'Search'),
+  Filter: createIcon(Filter, 'Filter'),
+  Calendar: createIcon(Calendar, 'Calendar'),
+  Clock: createIcon(Clock, 'Clock'),
+  Play: createIcon(Play, 'Resume'),
+  Pause: createIcon(Pause, 'Pause'),
+  FileText: createIcon(FileText, 'Document')
 };
