@@ -9,6 +9,8 @@ import {
 } from '@lumaspend/shared';
 import { env } from '../config/env.js';
 
+export { AppError };
+
 export function errorHandler(
   err: unknown,
   _req: Request,

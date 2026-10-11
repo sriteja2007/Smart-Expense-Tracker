@@ -57,8 +57,25 @@ export const updateProfileSchema = z.object({
     .optional(),
   theme: z.enum(['dark', 'light', 'system']).optional(),
   reducedMotion: z.boolean().optional(),
+  timezone: z.string().trim().max(60).optional(),
+  inAppNotifications: z.boolean().optional(),
   budgetAlertsEnabled: z.boolean().optional(),
-  weeklySummaryEmail: z.boolean().optional()
+  recurringRemindersEnabled: z.boolean().optional(),
+  goalMilestonesEnabled: z.boolean().optional(),
+  weeklySummaryEmail: z.boolean().optional(),
+  browserPushEnabled: z.boolean().optional()
 });
 
 export type UpdateProfileInput = z.infer<typeof updateProfileSchema>;
+
+export const deleteAccountSchema = z.object({
+  confirmPhrase: z
+    .string()
+    .trim()
+    .refine((val) => val === 'DELETE MY ACCOUNT', {
+      message: 'Please type "DELETE MY ACCOUNT" exactly to confirm account deletion.'
+    }),
+  password: z.string().optional()
+});
+
+export type DeleteAccountInput = z.infer<typeof deleteAccountSchema>;

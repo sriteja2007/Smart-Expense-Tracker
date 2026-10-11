@@ -3,6 +3,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
 import { apiRouter } from './routes/index.js';
+import rateLimit from 'express-rate-limit';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,9 +25,27 @@ export function createApp(): Express {
   );
 
   // CORS Configuration
+  const configuredOrigins = env.CLIENT_URL
+    ? env.CLIENT_URL.split(',').map((u) => u.trim().replace(/\/$/, ''))
+    : [];
+  const allowedOrigins = Array.from(
+    new Set([
+      ...configuredOrigins,
+      'http://localhost:5173',
+      'http://127.0.0.1:5173'
+    ])
+  );
+
   app.use(
     cors({
-      origin: [env.CLIENT_URL, 'http://localhost:5173', 'http://127.0.0.1:5173'],
+      origin: (origin, callback) => {
+        // Allow mobile apps, curl, or same-origin requests with no origin header
+        if (!origin || allowedOrigins.includes(origin) || env.NODE_ENV !== 'production') {
+          callback(null, true);
+        } else {
+          callback(new Error(`Origin ${origin} not permitted by CORS policy`));
+        }
+      },
       credentials: true,
       methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
       allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
@@ -60,8 +79,25 @@ export function createApp(): Express {
     }
   });
 
+  // General API Rate Limiter (Protects against DoS / resource exhaustion; bypassed in test suite)
+  const apiRateLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 300,
+    standardHeaders: true,
+    legacyHeaders: false,
+    skip: () => process.env.NODE_ENV === 'test' || env.NODE_ENV === 'test',
+    message: {
+      success: false,
+      error: {
+        code: 'RATE_LIMIT_EXCEEDED',
+        message: 'Too many requests. Please slow down and try again later.'
+      },
+      timestamp: new Date().toISOString()
+    }
+  });
+
   // Mount API endpoints
-  app.use('/api', apiRouter);
+  app.use('/api', apiRateLimiter, apiRouter);
 
   // Fallback 404 & Centralized Error Handler
   app.use(notFoundHandler);

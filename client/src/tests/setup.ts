@@ -305,6 +305,32 @@ globalThis.fetch = vi.fn().mockImplementation((url: RequestInfo | URL, options?:
     });
   }
 
+  // Notifications GET
+  if (urlStr.includes('/notifications')) {
+    return Promise.resolve({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          success: true,
+          data: [],
+          timestamp: new Date().toISOString()
+        })
+    });
+  }
+
+  // Households GET
+  if (urlStr.includes('/households')) {
+    return Promise.resolve({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          success: true,
+          data: [],
+          timestamp: new Date().toISOString()
+        })
+    });
+  }
+
   return Promise.resolve({
     ok: true,
     json: () =>
@@ -325,3 +351,17 @@ globalThis.fetch = vi.fn().mockImplementation((url: RequestInfo | URL, options?:
       })
   });
 }) as unknown as typeof fetch;
+
+// Polyfill URL.createObjectURL and URL.revokeObjectURL for jsdom tests
+if (typeof window !== 'undefined') {
+  if (!window.URL.createObjectURL) {
+    window.URL.createObjectURL = vi.fn(() => 'blob:mock-url');
+  }
+  if (!window.URL.revokeObjectURL) {
+    window.URL.revokeObjectURL = vi.fn();
+  }
+  if (!window.HTMLElement.prototype.scrollIntoView) {
+    window.HTMLElement.prototype.scrollIntoView = vi.fn();
+  }
+}
+

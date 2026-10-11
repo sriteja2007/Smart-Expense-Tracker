@@ -116,13 +116,16 @@ export interface Budget {
   id: string;
   userId: string;
   householdId?: string;
-  categoryId: string;
+  categoryId?: string; // If undefined or 'OVERALL', represents an overall monthly spending limit
   periodMonth: number; // 1-12
   periodYear: number;
   limitAmountMinorUnits: number;
   currency: CurrencyCode;
   alertThresholdPct: number; // e.g. 80 for 80%
   spentAmountMinorUnits?: number; // Calculated dynamically
+  remainingAmountMinorUnits?: number; // Math.max(0, limitAmountMinorUnits - spentAmountMinorUnits)
+  consumedPercent?: number; // (spentAmountMinorUnits / limitAmountMinorUnits) * 100
+  isExceeded?: boolean; // spentAmountMinorUnits > limitAmountMinorUnits
   createdAt: string;
   updatedAt: string;
 }
@@ -131,6 +134,7 @@ export interface Budget {
 // Savings Goal
 // ==========================================
 export type GoalStatus = 'active' | 'completed' | 'paused' | 'archived';
+export type GoalFundingMode = 'explicit_contribution' | 'linked_account';
 
 export interface SavingsGoal {
   id: string;
@@ -144,8 +148,83 @@ export interface SavingsGoal {
   color?: string;
   icon?: string;
   status: GoalStatus;
+  linkedAccountId?: string;
+  fundingMode?: GoalFundingMode;
+  progressPercent?: number;
+  requiredDailyPaceMinorUnits?: number;
+  requiredMonthlyPaceMinorUnits?: number;
+  daysRemaining?: number;
   createdAt: string;
   updatedAt: string;
+}
+
+// ==========================================
+// Analytics Domain Types
+// ==========================================
+export interface AnalyticsPreviousPeriodComparison {
+  incomeMinorUnits: number;
+  expenseMinorUnits: number;
+  netSavingsMinorUnits: number;
+  expenseDeltaPct: number;
+  expenseDeltaMinorUnits: number;
+}
+
+export interface LargestExpenseItem {
+  id: string;
+  description: string;
+  merchantName?: string;
+  categoryName?: string;
+  dateUtc: string;
+  amountMinorUnits: number;
+  currency: CurrencyCode;
+}
+
+export interface FrequentCategoryItem {
+  categoryId: string;
+  categoryName: string;
+  color: string;
+  count: number;
+  totalAmountMinorUnits: number;
+}
+
+export interface AnalyticsTrendPoint {
+  dateKey: string;
+  incomeMinorUnits: number;
+  expenseMinorUnits: number;
+  netMinorUnits: number;
+}
+
+export interface CategoryBreakdownItem {
+  categoryId: string;
+  categoryName: string;
+  color: string;
+  amountMinorUnits: number;
+  percentage: number;
+  transactionCount: number;
+}
+
+export interface BudgetVsActualItem {
+  budgetId: string;
+  categoryId?: string;
+  categoryName: string;
+  limitAmountMinorUnits: number;
+  spentAmountMinorUnits: number;
+  remainingAmountMinorUnits: number;
+  consumedPercent: number;
+  isOverBudget: boolean;
+}
+
+export interface AnalyticsSummaryData {
+  totalBalanceMinorUnits: number;
+  monthlyIncomeMinorUnits: number;
+  monthlyExpenseMinorUnits: number;
+  netSavingsMinorUnits: number;
+  savingsRatePct: number;
+  previousPeriod?: AnalyticsPreviousPeriodComparison;
+  largestExpenses?: LargestExpenseItem[];
+  frequentlyUsedCategories?: FrequentCategoryItem[];
+  accountCount: number;
+  transactionCount: number;
 }
 
 // ==========================================
@@ -200,7 +279,7 @@ export interface Notification {
 // ==========================================
 // Household / Shared Budget
 // ==========================================
-export type HouseholdRole = 'owner' | 'admin' | 'member' | 'viewer';
+export type HouseholdRole = 'owner' | 'editor' | 'viewer' | 'admin' | 'member';
 
 export interface HouseholdMember {
   userId: string;
@@ -210,14 +289,66 @@ export interface HouseholdMember {
   joinedAt: string;
 }
 
+export type InvitationStatus = 'pending' | 'accepted' | 'revoked' | 'expired';
+
+export interface HouseholdInvitation {
+  id: string;
+  householdId: string;
+  householdName: string;
+  inviterUserId: string;
+  inviterName: string;
+  inviteeEmail: string;
+  role: 'editor' | 'viewer';
+  token: string;
+  status: InvitationStatus;
+  expiresAt: string;
+  createdAt: string;
+}
+
+export interface HouseholdAuditLog {
+  id: string;
+  action:
+    | 'household_created'
+    | 'member_invited'
+    | 'invitation_accepted'
+    | 'invitation_revoked'
+    | 'member_removed'
+    | 'role_updated';
+  actorUserId: string;
+  actorName: string;
+  targetUserId?: string;
+  targetEmail?: string;
+  role?: HouseholdRole;
+  details?: string;
+  timestamp: string;
+}
+
 export interface Household {
   id: string;
   name: string;
   ownerId: string;
   members: HouseholdMember[];
+  invitations?: HouseholdInvitation[];
+  auditLogs?: HouseholdAuditLog[];
   currency: CurrencyCode;
   createdAt: string;
   updatedAt: string;
+}
+
+// ==========================================
+// User Data Archive Export
+// ==========================================
+export interface UserDataExport {
+  exportedAt: string;
+  formatVersion: string;
+  user: any;
+  accounts: FinancialAccount[];
+  transactions: Transaction[];
+  budgets: Budget[];
+  goals: SavingsGoal[];
+  recurringSchedules: RecurringSchedule[];
+  notifications: Notification[];
+  households: Household[];
 }
 
 // ==========================================
@@ -270,4 +401,64 @@ export interface CsvImportPreviewResult {
   invalidCount: number;
   duplicateCount: number;
   rows: CsvImportRow[];
+}
+
+// ==========================================
+// Receipt OCR Scanning Types
+// ==========================================
+export interface ReceiptScanResult {
+  candidateMerchant?: string;
+  candidateDateUtc?: string;
+  candidateAmountMinorUnits?: number;
+  candidateCurrency: CurrencyCode;
+  suggestedCategoryId?: string;
+  confidenceScore: number; // 0 - 100
+  isReadable: boolean;
+  rawTextPreview?: string;
+  warning?: string;
+}
+
+// ==========================================
+// AI Assistant & Insights Types
+// ==========================================
+export interface AiInsightSummary {
+  periodMonth: number;
+  periodYear: number;
+  totalIncomeMinorUnits: number;
+  totalExpenseMinorUnits: number;
+  netSavingsMinorUnits: number;
+  savingsRatePct: number;
+  overBudgetCategories: {
+    categoryName: string;
+    spentMinorUnits: number;
+    limitMinorUnits: number;
+    percent: number;
+  }[];
+  topExpenseCategories: {
+    categoryName: string;
+    amountMinorUnits: number;
+    percentage: number;
+  }[];
+  largestExpenses: {
+    description: string;
+    amountMinorUnits: number;
+    dateUtc: string;
+    categoryName?: string;
+  }[];
+  spendingComparisonVsPrevMonth?: {
+    expenseDeltaPct: number;
+    incomeDeltaPct: number;
+  };
+  ruleBasedSuggestions: string[];
+}
+
+export interface AiChatMessageResponse {
+  conversationId: string;
+  userMessage: AiMessage;
+  aiMessage: AiMessage;
+  isAiGenerated: boolean;
+  isFallback: boolean;
+  model: string;
+  analysisPeriod: string;
+  disclaimer: string;
 }

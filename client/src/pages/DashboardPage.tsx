@@ -7,13 +7,22 @@ import { Card, CardHeader, CardContent } from '@/components/ui/card';
 import { GlassPanel } from '@/components/ui/glass-panel';
 import { useToast } from '@/components/ui/toast';
 import { useAuth } from '@/context/AuthContext';
-import { FinancialApi, type AnalyticsSummary } from '@/lib/financial-api';
+import { FinancialApi } from '@/lib/financial-api';
 import { TransactionTable } from '@/components/transactions/TransactionTable';
 import { TransactionDialog } from '@/components/transactions/TransactionDialog';
 import { DeleteConfirmDialog } from '@/components/transactions/DeleteConfirmDialog';
 import { CsvImportModal } from '@/components/transactions/CsvImportModal';
 import { AccountSummaryCards } from '@/components/transactions/AccountSummaryCards';
 import { RecurringManager } from '@/components/transactions/RecurringManager';
+import { BudgetManager } from '@/components/financial/BudgetManager';
+import { SavingsGoalManager } from '@/components/financial/SavingsGoalManager';
+import { AnalyticsDashboard } from '@/components/financial/AnalyticsDashboard';
+import { ReportExporter } from '@/components/financial/ReportExporter';
+import { AiAdvisor } from '@/components/ai/AiAdvisor';
+import { ReceiptScannerModal } from '@/components/receipts/ReceiptScannerModal';
+import { NotificationCenter } from '@/components/notifications/NotificationCenter';
+import { HouseholdManager } from '@/components/household/HouseholdManager';
+import { SettingsView } from '@/components/settings/SettingsView';
 import {
   formatCurrency,
   fromMinorUnits,
@@ -22,28 +31,31 @@ import {
   type CurrencyCode,
   type Transaction,
   type FinancialAccount,
-  type Category,
-  type RecurringSchedule
+  type FinancialCategory,
+  type RecurringSchedule,
+  type AnalyticsSummaryData
 } from '@lumaspend/shared';
 
-type DashboardTab = 'overview' | 'transactions' | 'budgets' | 'recurring' | 'analytics' | 'settings';
+type DashboardTab = 'overview' | 'transactions' | 'budgets' | 'goals' | 'analytics' | 'reports' | 'ai' | 'recurring' | 'household' | 'settings';
 
 export const DashboardPage: React.FC = () => {
   const navigate = useNavigate();
   const { toast } = useToast();
-  const { user, logout, updateProfile } = useAuth();
+  const { user, logout } = useAuth();
 
   const [activeTab, setActiveTab] = useState<DashboardTab>('overview');
   const [currency, setCurrency] = useState<CurrencyCode>(
     user?.preferences?.defaultCurrency || DEFAULT_CURRENCY
   );
 
+  const [activeHouseholdId, setActiveHouseholdId] = useState<string | undefined>(undefined);
+
   // Financial Domain Data State
   const [accounts, setAccounts] = useState<FinancialAccount[]>([]);
-  const [categories, setCategories] = useState<Category[]>([]);
+  const [categories, setCategories] = useState<FinancialCategory[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [recurringSchedules, setRecurringSchedules] = useState<RecurringSchedule[]>([]);
-  const [analytics, setAnalytics] = useState<AnalyticsSummary | null>(null);
+  const [analytics, setAnalytics] = useState<AnalyticsSummaryData | null>(null);
 
   // Pagination & Filtering
   const [currentPage, setCurrentPage] = useState(1);
@@ -63,6 +75,7 @@ export const DashboardPage: React.FC = () => {
   const [deletingTx, setDeletingTx] = useState<Transaction | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isImportOpen, setIsImportOpen] = useState(false);
+  const [isScanReceiptOpen, setIsScanReceiptOpen] = useState(false);
 
   // Fetch all domain data
   const loadFinancialData = useCallback(async () => {
@@ -79,6 +92,7 @@ export const DashboardPage: React.FC = () => {
           type: filterType !== 'all' ? filterType : undefined,
           categoryId: filterCategory || undefined,
           accountId: filterAccount || undefined,
+          householdId: activeHouseholdId,
           sortBy: sortField,
           sortOrder
         }),
@@ -109,7 +123,7 @@ export const DashboardPage: React.FC = () => {
     } finally {
       setIsLoading(false);
     }
-  }, [currentPage, searchQuery, filterType, filterCategory, filterAccount, sortField, sortOrder, currency]);
+  }, [currentPage, searchQuery, filterType, filterCategory, filterAccount, activeHouseholdId, sortField, sortOrder, currency]);
 
   useEffect(() => {
     loadFinancialData();
@@ -178,9 +192,13 @@ export const DashboardPage: React.FC = () => {
   const navItems = [
     { id: 'overview' as const, label: 'Overview', icon: <Icons.Activity className="h-4 w-4" /> },
     { id: 'transactions' as const, label: 'Ledger', icon: <Icons.Wallet className="h-4 w-4" /> },
-    { id: 'recurring' as const, label: 'Recurring', icon: <Icons.Clock className="h-4 w-4" /> },
     { id: 'budgets' as const, label: 'Budgets', icon: <Icons.Shield className="h-4 w-4" /> },
-    { id: 'analytics' as const, label: 'Analytics', icon: <Icons.Income className="h-4 w-4" /> },
+    { id: 'goals' as const, label: 'Savings Goals', icon: <Icons.Target className="h-4 w-4" /> },
+    { id: 'analytics' as const, label: 'Analytics', icon: <Icons.TrendingUp className="h-4 w-4" /> },
+    { id: 'ai' as const, label: 'AI Advisor', icon: <Icons.Bot className="h-4 w-4" /> },
+    { id: 'reports' as const, label: 'Reports', icon: <Icons.FileText className="h-4 w-4" /> },
+    { id: 'recurring' as const, label: 'Recurring', icon: <Icons.Clock className="h-4 w-4" /> },
+    { id: 'household' as const, label: 'Shared Spaces', icon: <Icons.Users className="h-4 w-4" /> },
     { id: 'settings' as const, label: 'Settings', icon: <Icons.Terminal className="h-4 w-4" /> }
   ];
 
@@ -269,7 +287,31 @@ export const DashboardPage: React.FC = () => {
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2.5 sm:gap-3">
+            {activeHouseholdId && (
+              <div className="hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-brand-violet/15 border border-brand-violet/30 text-xs text-white">
+                <span className="w-2 h-2 rounded-full bg-brand-violet animate-pulse" />
+                <span className="font-medium">Shared Space Active</span>
+                <button
+                  onClick={() => setActiveHouseholdId(undefined)}
+                  className="ml-1 text-[10px] text-slate-400 hover:text-white underline cursor-pointer"
+                >
+                  Switch to Personal
+                </button>
+              </div>
+            )}
+
+            <NotificationCenter />
+
+            <Button
+              variant="glass"
+              size="sm"
+              onClick={() => setIsScanReceiptOpen(true)}
+              className="text-xs text-text-secondary hover:text-white"
+            >
+              <Icons.Camera className="h-3.5 w-3.5 mr-1.5" />
+              <span className="hidden sm:inline">Scan Receipt</span>
+            </Button>
             <Button
               variant="primary"
               size="sm"
@@ -452,8 +494,14 @@ export const DashboardPage: React.FC = () => {
               onDeleteTransaction={(tx) => setDeletingTx(tx)}
               onOpenAddModal={() => setIsAddTxOpen(true)}
               onOpenImportModal={() => setIsImportOpen(true)}
+              onOpenScanModal={() => setIsScanReceiptOpen(true)}
               onRefresh={loadFinancialData}
             />
+          )}
+
+          {/* AI ADVISOR TAB */}
+          {activeTab === 'ai' && (
+            <AiAdvisor currency={currency} />
           )}
 
           {/* RECURRING TAB */}
@@ -469,128 +517,50 @@ export const DashboardPage: React.FC = () => {
 
           {/* BUDGETS TAB */}
           {activeTab === 'budgets' && (
-            <div className="space-y-6">
-              <div className="flex justify-between items-center">
-                <div>
-                  <h2 className="text-xl font-bold text-white">Monthly Budgets & Caps</h2>
-                  <p className="text-xs text-text-secondary">Track limits and avoid overspending</p>
-                </div>
-                <Badge variant="violet">Cycle: October 2026</Badge>
-              </div>
+            <BudgetManager categories={categories} currency={currency} />
+          )}
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {categories
-                  .filter((c) => c.type === 'expense')
-                  .slice(0, 4)
-                  .map((cat) => (
-                    <Card key={cat.id} className="glass-card-interactive p-5 space-y-3">
-                      <div className="flex justify-between items-center">
-                        <span className="text-xs font-bold text-white">{cat.name}</span>
-                        <span className="text-xs text-text-muted">₹15,000 Cap</span>
-                      </div>
-                      <div className="w-full bg-surface-elevated h-2 rounded-full overflow-hidden">
-                        <div className="bg-brand-violet h-full rounded-full w-2/5" />
-                      </div>
-                      <p className="text-[11px] text-text-muted">₹6,000 spent • 40% utilized</p>
-                    </Card>
-                  ))}
-              </div>
-            </div>
+          {/* SAVINGS GOALS TAB */}
+          {activeTab === 'goals' && (
+            <SavingsGoalManager accounts={accounts} currency={currency} />
           )}
 
           {/* ANALYTICS TAB */}
           {activeTab === 'analytics' && (
-            <div className="space-y-6">
-              <div>
-                <h2 className="text-xl font-bold text-white">Financial Analytics</h2>
-                <p className="text-xs text-text-secondary">Comprehensive breakdown of income, expenditure, and savings</p>
-              </div>
+            <AnalyticsDashboard accounts={accounts} categories={categories} currency={currency} />
+          )}
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <Card className="glass-card p-6 space-y-4">
-                  <h3 className="text-sm font-bold text-white">Income vs Expense Ratio</h3>
-                  <div className="space-y-3 pt-2">
-                    <div>
-                      <div className="flex justify-between text-xs mb-1">
-                        <span className="text-finance-income font-medium">Income Inflow</span>
-                        <span className="font-mono text-white font-semibold">{formatCurrency(totalIncome, currency)}</span>
-                      </div>
-                      <div className="h-2 rounded-full bg-surface-elevated overflow-hidden">
-                        <div className="h-full bg-finance-income rounded-full w-full" />
-                      </div>
-                    </div>
+          {/* REPORTS TAB */}
+          {activeTab === 'reports' && (
+            <ReportExporter currency={currency} />
+          )}
 
-                    <div>
-                      <div className="flex justify-between text-xs mb-1">
-                        <span className="text-finance-expense font-medium">Expense Outflow</span>
-                        <span className="font-mono text-white font-semibold">{formatCurrency(totalExpense, currency)}</span>
-                      </div>
-                      <div className="h-2 rounded-full bg-surface-elevated overflow-hidden">
-                        <div
-                          className="h-full bg-finance-expense rounded-full"
-                          style={{
-                            width: `${totalIncome > 0 ? Math.min(100, (totalExpense / totalIncome) * 100) : 0}%`
-                          }}
-                        />
-                      </div>
-                    </div>
-                  </div>
-                </Card>
-
-                <Card className="glass-card p-6 space-y-4">
-                  <h3 className="text-sm font-bold text-white">Savings Efficiency</h3>
-                  <div className="flex flex-col items-center justify-center p-6 text-center space-y-2">
-                    <div className="text-3xl font-extrabold text-brand-glow">
-                      {totalIncome > 0 ? `${Math.round(((totalIncome - totalExpense) / totalIncome) * 100)}%` : '0%'}
-                    </div>
-                    <p className="text-xs text-text-secondary">Net monthly savings rate preserved</p>
-                  </div>
-                </Card>
-              </div>
-            </div>
+          {/* SHARED HOUSEHOLDS TAB */}
+          {activeTab === 'household' && (
+            <HouseholdManager
+              currentUserId={user?.id || ''}
+              activeHouseholdId={activeHouseholdId}
+              onSelectHousehold={(id) => {
+                setActiveHouseholdId(id);
+                if (id) {
+                  toast({
+                    title: 'Space Switched',
+                    description: 'Transactions and budgets scoped to this shared space.',
+                    type: 'info'
+                  });
+                }
+              }}
+            />
           )}
 
           {/* SETTINGS TAB */}
           {activeTab === 'settings' && (
-            <div className="space-y-6 max-w-2xl">
-              <div>
-                <h2 className="text-xl font-bold text-white">Platform Settings</h2>
-                <p className="text-xs text-text-secondary">Personalize currency, theme tokens, and accessibility</p>
-              </div>
-
-              <Card className="glass-card space-y-6 p-6">
-                <div>
-                  <label className="text-xs font-bold text-white block mb-1">Default Base Currency</label>
-                  <p className="text-xs text-text-secondary mb-3">
-                    Used for all ledger calculations, totals, and report downloads. Defaults to INR (₹).
-                  </p>
-                  <select
-                    value={currency}
-                    onChange={async (e) => {
-                      const newCurr = e.target.value as CurrencyCode;
-                      setCurrency(newCurr);
-                      await updateProfile({ defaultCurrency: newCurr });
-                      toast({ title: 'Currency Updated', description: `Base currency changed to ${newCurr}`, type: 'success' });
-                    }}
-                    className="h-10 px-3 rounded-xl bg-surface-elevated border border-white/10 text-xs text-text-primary"
-                  >
-                    {Object.values(SUPPORTED_CURRENCIES).map((c) => (
-                      <option key={c.code} value={c.code} className="bg-surface-elevated text-white">
-                        {c.code} ({c.symbol}) — {c.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="pt-4 border-t border-white/5 flex items-center justify-between">
-                  <div>
-                    <p className="text-xs font-bold text-white">Prefers Reduced Motion</p>
-                    <p className="text-[11px] text-text-secondary">Disables 3D physics and spring animations for accessibility</p>
-                  </div>
-                  <Badge variant="violet">System Aware</Badge>
-                </div>
-              </Card>
-            </div>
+            <SettingsView
+              user={user}
+              onProfileUpdated={loadFinancialData}
+              currency={currency}
+              onCurrencyChange={setCurrency}
+            />
           )}
         </main>
 
@@ -647,6 +617,16 @@ export const DashboardPage: React.FC = () => {
         onClose={() => setIsImportOpen(false)}
         onSuccess={loadFinancialData}
         accounts={accounts}
+      />
+
+      {/* RECEIPT SCANNER MODAL */}
+      <ReceiptScannerModal
+        open={isScanReceiptOpen}
+        onClose={() => setIsScanReceiptOpen(false)}
+        accounts={accounts}
+        categories={categories}
+        currency={currency}
+        onTransactionCreated={loadFinancialData}
       />
     </div>
   );

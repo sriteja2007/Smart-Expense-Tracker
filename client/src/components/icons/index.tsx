@@ -33,6 +33,20 @@ import {
   Play,
   Pause,
   FileText,
+  Target,
+  PieChart,
+  Bell,
+  Layers,
+  List,
+  Check,
+  Bot,
+  Camera,
+  Users,
+  Copy,
+  X,
+  ExternalLink,
+  Settings,
+  LogOut,
   type LucideProps
 } from 'lucide-react';
 
@@ -87,5 +101,20 @@ export const Icons = {
   Clock: createIcon(Clock, 'Clock'),
   Play: createIcon(Play, 'Resume'),
   Pause: createIcon(Pause, 'Pause'),
-  FileText: createIcon(FileText, 'Document')
+  FileText: createIcon(FileText, 'Document'),
+  Target: createIcon(Target, 'Savings Goal Target'),
+  PieChart: createIcon(PieChart, 'Pie Chart'),
+  Bell: createIcon(Bell, 'Notifications / Alerts'),
+  Layers: createIcon(Layers, 'Layers / Data'),
+  List: createIcon(List, 'List / Table View'),
+  Check: createIcon(Check, 'Checkmark'),
+  TrendingUp: createIcon(TrendingUp, 'Trending Up'),
+  Bot: createIcon(Bot, 'AI Bot'),
+  Camera: createIcon(Camera, 'Receipt Camera / Scan'),
+  Users: createIcon(Users, 'Users / Household'),
+  Copy: createIcon(Copy, 'Copy Link'),
+  X: createIcon(X, 'Close / Dismiss'),
+  ExternalLink: createIcon(ExternalLink, 'External Link'),
+  Settings: createIcon(Settings, 'Settings'),
+  LogOut: createIcon(LogOut, 'Log Out')
 };

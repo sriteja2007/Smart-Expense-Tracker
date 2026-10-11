@@ -4,7 +4,7 @@ import type { Budget, CurrencyCode } from '@lumaspend/shared';
 export interface IBudget extends Document {
   userId: string;
   householdId?: string;
-  categoryId: string;
+  categoryId?: string;
   periodMonth: number;
   periodYear: number;
   limitAmountMinorUnits: number;
@@ -29,7 +29,8 @@ const BudgetSchema = new Schema<IBudget>(
     },
     categoryId: {
       type: String,
-      required: true
+      default: 'OVERALL',
+      index: true
     },
     periodMonth: {
       type: Number,
@@ -71,17 +72,27 @@ BudgetSchema.index(
 );
 
 BudgetSchema.methods.toBudget = function (spentAmountMinorUnits = 0): Budget {
+  const remainingAmountMinorUnits = Math.max(0, this.limitAmountMinorUnits - spentAmountMinorUnits);
+  const consumedPercent =
+    this.limitAmountMinorUnits > 0
+      ? Number(((spentAmountMinorUnits / this.limitAmountMinorUnits) * 100).toFixed(1))
+      : 0;
+  const isExceeded = spentAmountMinorUnits > this.limitAmountMinorUnits;
+
   return {
     id: this._id.toString(),
     userId: this.userId,
     householdId: this.householdId || undefined,
-    categoryId: this.categoryId,
+    categoryId: this.categoryId && this.categoryId !== 'OVERALL' ? this.categoryId : undefined,
     periodMonth: this.periodMonth,
     periodYear: this.periodYear,
     limitAmountMinorUnits: this.limitAmountMinorUnits,
     currency: this.currency as CurrencyCode,
     alertThresholdPct: this.alertThresholdPct,
     spentAmountMinorUnits,
+    remainingAmountMinorUnits,
+    consumedPercent,
+    isExceeded,
     createdAt: this.createdAt.toISOString(),
     updatedAt: this.updatedAt.toISOString()
   };

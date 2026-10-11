@@ -8,93 +8,84 @@ export const analyticsRouter = Router();
 
 analyticsRouter.use(requireAuth);
 
-// GET /api/analytics/summary - High-level financial KPIs in minor units
+// GET /api/analytics/summary - High-level financial KPIs, previous period comparisons & top drivers
 analyticsRouter.get(
   '/summary',
   asyncHandler(async (req, res) => {
     const userId = req.user!.id;
-    const accounts = await FinancialRepository.listAccounts(userId);
-    const totalBalanceMinorUnits = accounts.reduce((acc, a) => acc + a.balanceMinorUnits, 0);
-
-    const now = new Date();
-    const startOfMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
-    const endOfMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0, 23, 59, 59, 999)).toISOString();
-
-    const { transactions } = await FinancialRepository.listTransactions(userId, {
-      startDateUtc: startOfMonth,
-      endDateUtc: endOfMonth,
-      limit: 1000
+    const summary = await FinancialRepository.getAnalyticsSummary(userId, {
+      startDateUtc: req.query.startDateUtc as string | undefined,
+      endDateUtc: req.query.endDateUtc as string | undefined,
+      accountId: req.query.accountId as string | undefined,
+      categoryId: req.query.categoryId as string | undefined
     });
-
-    let monthlyIncomeMinorUnits = 0;
-    let monthlyExpenseMinorUnits = 0;
-
-    for (const t of transactions) {
-      if (t.type === 'income') monthlyIncomeMinorUnits += t.amountMinorUnits;
-      if (t.type === 'expense') monthlyExpenseMinorUnits += t.amountMinorUnits;
-    }
-
-    const netSavingsMinorUnits = monthlyIncomeMinorUnits - monthlyExpenseMinorUnits;
-    const savingsRatePct =
-      monthlyIncomeMinorUnits > 0
-        ? Math.round(Math.max(0, (netSavingsMinorUnits / monthlyIncomeMinorUnits) * 100))
-        : 0;
 
     res.status(HttpStatus.OK).json({
       success: true,
-      data: {
-        totalBalanceMinorUnits,
-        monthlyIncomeMinorUnits,
-        monthlyExpenseMinorUnits,
-        netSavingsMinorUnits,
-        savingsRatePct,
-        accountCount: accounts.length,
-        transactionCount: transactions.length
-      }
+      data: summary
     });
   })
 );
 
-// GET /api/analytics/category-breakdown - Spending by category for charts
+// GET /api/analytics/trends - Daily, weekly or monthly income/expense trend time series
+analyticsRouter.get(
+  '/trends',
+  asyncHandler(async (req, res) => {
+    const userId = req.user!.id;
+    const interval = (req.query.interval as 'daily' | 'weekly' | 'monthly') || 'daily';
+
+    const trends = await FinancialRepository.getAnalyticsTrends(userId, {
+      interval,
+      startDateUtc: req.query.startDateUtc as string | undefined,
+      endDateUtc: req.query.endDateUtc as string | undefined,
+      accountId: req.query.accountId as string | undefined,
+      categoryId: req.query.categoryId as string | undefined
+    });
+
+    res.status(HttpStatus.OK).json({
+      success: true,
+      data: trends
+    });
+  })
+);
+
+// GET /api/analytics/category-breakdown - Spending by category with shares and transaction counts
 analyticsRouter.get(
   '/category-breakdown',
+  asyncHandler(async (req, res) => {
+    const userId = req.user!.id;
+    const month = req.query.month ? parseInt(req.query.month as string, 10) : undefined;
+    const year = req.query.year ? parseInt(req.query.year as string, 10) : undefined;
+
+    const breakdown = await FinancialRepository.getCategoryBreakdown(userId, {
+      month,
+      year,
+      startDateUtc: req.query.startDateUtc as string | undefined,
+      endDateUtc: req.query.endDateUtc as string | undefined,
+      accountId: req.query.accountId as string | undefined
+    });
+
+    res.status(HttpStatus.OK).json({
+      success: true,
+      data: breakdown
+    });
+  })
+);
+
+// GET /api/analytics/budget-vs-actual - Budget performance comparison for period
+analyticsRouter.get(
+  '/budget-vs-actual',
   asyncHandler(async (req, res) => {
     const userId = req.user!.id;
     const now = new Date();
     const month = req.query.month ? parseInt(req.query.month as string, 10) : now.getUTCMonth() + 1;
     const year = req.query.year ? parseInt(req.query.year as string, 10) : now.getUTCFullYear();
 
-    const startOfMonth = new Date(Date.UTC(year, month - 1, 1)).toISOString();
-    const endOfMonth = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999)).toISOString();
+    const budgetVsActual = await FinancialRepository.getBudgetVsActual(userId, month, year);
 
-    const [categories, { transactions }] = await Promise.all([
-      FinancialRepository.listCategories(userId),
-      FinancialRepository.listTransactions(userId, {
-        type: 'expense',
-        startDateUtc: startOfMonth,
-        endDateUtc: endOfMonth,
-        limit: 1000
-      })
-    ]);
-
-    const catMap = new Map(categories.map((c) => [c.id, c]));
-    const totalsByCat = new Map<string, number>();
-
-    for (const t of transactions) {
-      const catId = t.categoryId || 'uncategorized';
-      totalsByCat.set(catId, (totalsByCat.get(catId) || 0) + t.amountMinorUnits);
-    }
-
-    const breakdown = Array.from(totalsByCat.entries()).map(([catId, amountMinorUnits]) => {
-      const cat = catMap.get(catId);
-      return {
-        categoryId: catId,
-        categoryName: cat ? cat.name : 'Uncategorized',
-        color: cat ? cat.color : '#94A3B8',
-        amountMinorUnits
-      };
+    res.status(HttpStatus.OK).json({
+      success: true,
+      data: budgetVsActual
     });
-
-    res.status(HttpStatus.OK).json({ success: true, data: breakdown });
   })
 );

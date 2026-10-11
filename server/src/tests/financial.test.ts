@@ -751,5 +751,426 @@ describe('Financial Domain Models, REST APIs & Multi-Tenant Isolation Suite', ()
     expect(pauseRes.status).toBe(200);
     expect(pauseRes.body.data.isActive).toBe(false);
   });
+
+  // ==========================================
+  // Phase 6: Budgets & Overall Spending Limits
+  // ==========================================
+  it('should manage category budgets and overall limits, excluding transfers and cancelled records', async () => {
+    const { cookies } = await createSession('budgetuser@example.com', 'Budget User');
+
+    // Create account
+    const accRes = await request(app)
+      .post('/api/accounts')
+      .set('Cookie', cookies)
+      .send({
+        name: 'Main Wallet',
+        type: 'checking',
+        initialBalanceMinorUnits: 500000 // ₹5,000.00
+      });
+    const accId = accRes.body.data.id;
+
+    const currentYear = new Date().getUTCFullYear();
+    const currentMonth = new Date().getUTCMonth() + 1;
+
+    // 1. Create category budget: Groceries (sys-cat-2) limit = 100,000 paise (₹1,000.00)
+    const catBudgetRes = await request(app)
+      .post('/api/budgets')
+      .set('Cookie', cookies)
+      .send({
+        categoryId: 'sys-cat-2',
+        periodMonth: currentMonth,
+        periodYear: currentYear,
+        limitAmountMinorUnits: 100000,
+        alertThresholdPct: 80
+      });
+    expect(catBudgetRes.status).toBe(201);
+    expect(catBudgetRes.body.data.limitAmountMinorUnits).toBe(100000);
+    expect(catBudgetRes.body.data.categoryId).toBe('sys-cat-2');
+
+    // 2. Create overall monthly budget limit = 300,000 paise (₹3,000.00) without categoryId
+    const overallBudgetRes = await request(app)
+      .post('/api/budgets')
+      .set('Cookie', cookies)
+      .send({
+        periodMonth: currentMonth,
+        periodYear: currentYear,
+        limitAmountMinorUnits: 300000,
+        alertThresholdPct: 75
+      });
+    expect(overallBudgetRes.status).toBe(201);
+    expect(overallBudgetRes.body.data.limitAmountMinorUnits).toBe(300000);
+    expect(overallBudgetRes.body.data.categoryId).toBeUndefined();
+
+    // 3. Add eligible grocery expense: 80,000 paise (80% of category budget)
+    await request(app)
+      .post('/api/transactions')
+      .set('Cookie', cookies)
+      .send({
+        type: 'expense',
+        amountMinorUnits: 80000,
+        sourceAccountId: accId,
+        categoryId: 'sys-cat-2',
+        description: 'Supermarket Groceries'
+      });
+
+    // 4. Add eligible entertainment expense: 50,000 paise (counts towards overall, not groceries)
+    await request(app)
+      .post('/api/transactions')
+      .set('Cookie', cookies)
+      .send({
+        type: 'expense',
+        amountMinorUnits: 50000,
+        sourceAccountId: accId,
+        categoryId: 'sys-cat-7',
+        description: 'Movie IMAX'
+      });
+
+    // 5. Add a CANCELLED expense: 200,000 paise (MUST BE EXCLUDED)
+    const cancelledTx = await request(app)
+      .post('/api/transactions')
+      .set('Cookie', cookies)
+      .send({
+        type: 'expense',
+        amountMinorUnits: 200000,
+        sourceAccountId: accId,
+        categoryId: 'sys-cat-2',
+        description: 'Refunded Purchase'
+      });
+    await request(app)
+      .patch(`/api/transactions/${cancelledTx.body.data.id}`)
+      .set('Cookie', cookies)
+      .send({ status: 'cancelled' });
+
+    // 6. Fetch budgets and verify spending and calculations
+    const listBudgetsRes = await request(app)
+      .get(`/api/budgets?month=${currentMonth}&year=${currentYear}`)
+      .set('Cookie', cookies);
+    expect(listBudgetsRes.status).toBe(200);
+
+    const budgets = listBudgetsRes.body.data;
+    expect(budgets.length).toBe(2);
+
+    const groc = budgets.find((b: any) => b.categoryId === 'sys-cat-2');
+    expect(groc).toBeDefined();
+    expect(groc.spentAmountMinorUnits).toBe(80000); // 80,000 paise, cancelled 200,000 excluded!
+    expect(groc.remainingAmountMinorUnits).toBe(20000); // 100,000 - 80,000
+    expect(groc.consumedPercent).toBe(80);
+    expect(groc.isExceeded).toBe(false);
+
+    const overall = budgets.find((b: any) => !b.categoryId);
+    expect(overall).toBeDefined();
+    expect(overall.spentAmountMinorUnits).toBe(130000); // 80,000 (groceries) + 50,000 (entertainment)
+    expect(overall.remainingAmountMinorUnits).toBe(170000);
+    expect(overall.consumedPercent).toBeCloseTo(43.3, 1);
+    expect(overall.isExceeded).toBe(false);
+  });
+
+  // ==========================================
+  // Phase 6: Budget Thresholds & Duplicate Alert Prevention
+  // ==========================================
+  it('should trigger threshold warnings and prevent duplicate alerts for the same period and threshold', async () => {
+    const { cookies } = await createSession('alertuser@example.com', 'Alert User');
+
+    const accRes = await request(app)
+      .post('/api/accounts')
+      .set('Cookie', cookies)
+      .send({
+        name: 'Alert Wallet',
+        type: 'checking',
+        initialBalanceMinorUnits: 1000000
+      });
+    const accId = accRes.body.data.id;
+
+    const currentYear = new Date().getUTCFullYear();
+    const currentMonth = new Date().getUTCMonth() + 1;
+
+    // Create budget: 100,000 paise limit, threshold 75%
+    await request(app)
+      .post('/api/budgets')
+      .set('Cookie', cookies)
+      .send({
+        categoryId: 'sys-cat-3', // Dining & Food
+        periodMonth: currentMonth,
+        periodYear: currentYear,
+        limitAmountMinorUnits: 100000,
+        alertThresholdPct: 75
+      });
+
+    // Add expense: 92,000 paise (92% consumed -> crosses 75% and 90% milestones)
+    await request(app)
+      .post('/api/transactions')
+      .set('Cookie', cookies)
+      .send({
+        type: 'expense',
+        amountMinorUnits: 92000,
+        sourceAccountId: accId,
+        categoryId: 'sys-cat-3',
+        description: 'Fine Dining'
+      });
+
+    // 1. First alert evaluation: should trigger notifications for milestones crossed (75% and 90%)
+    const trigger1 = await request(app)
+      .post('/api/budgets/check-alerts')
+      .set('Cookie', cookies)
+      .send({ month: currentMonth, year: currentYear });
+
+    expect(trigger1.status).toBe(200);
+    expect(trigger1.body.data.triggeredCount).toBeGreaterThanOrEqual(1);
+
+    // Verify notifications were created
+    const notifs1 = await request(app)
+      .get('/api/notifications')
+      .set('Cookie', cookies);
+    expect(notifs1.status).toBe(200);
+    const countBefore = notifs1.body.data.length;
+    expect(countBefore).toBeGreaterThanOrEqual(1);
+
+    // 2. Second alert evaluation: MUST NOT duplicate existing alerts for the same period and threshold
+    const trigger2 = await request(app)
+      .post('/api/budgets/check-alerts')
+      .set('Cookie', cookies)
+      .send({ month: currentMonth, year: currentYear });
+
+    expect(trigger2.status).toBe(200);
+    expect(trigger2.body.data.triggeredCount).toBe(0); // 0 duplicates!
+
+    // Verify notifications count has not increased
+    const notifs2 = await request(app)
+      .get('/api/notifications')
+      .set('Cookie', cookies);
+    expect(notifs2.body.data.length).toBe(countBefore);
+  });
+
+  // ==========================================
+  // Phase 6: Savings Goals Progress & Pace Math
+  // ==========================================
+  it('should calculate savings goal progress and required pace without double-counting linked accounts', async () => {
+    const { cookies } = await createSession('goalsuser@example.com', 'Goals User');
+
+    // Create a savings account with 150,000 paise (₹1,500.00)
+    const accRes = await request(app)
+      .post('/api/accounts')
+      .set('Cookie', cookies)
+      .send({
+        name: 'Fixed Deposit Vault',
+        type: 'savings',
+        initialBalanceMinorUnits: 150000
+      });
+    const accId = accRes.body.data.id;
+
+    // Target date 30 days from now
+    const targetDate = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+
+    // 1. Create a linked-account goal: target 300,000 paise (₹3,000.00)
+    const linkedGoalRes = await request(app)
+      .post('/api/goals')
+      .set('Cookie', cookies)
+      .send({
+        name: 'Emergency Fund',
+        targetAmountMinorUnits: 300000,
+        targetDateUtc: targetDate,
+        linkedAccountId: accId,
+        fundingMode: 'linked_account'
+      });
+
+    expect(linkedGoalRes.status).toBe(201);
+    const linkedGoal = linkedGoalRes.body.data;
+    // Current amount dynamically reflects account balance (150,000)
+    expect(linkedGoal.currentAmountMinorUnits).toBe(150000);
+    expect(linkedGoal.progressPercent).toBe(50); // 150,000 / 300,000 = 50%
+    expect(linkedGoal.requiredDailyPaceMinorUnits).toBeGreaterThan(0);
+    expect(linkedGoal.requiredMonthlyPaceMinorUnits).toBeGreaterThan(0);
+
+    // 2. Calling contributeToGoal on a linked-account goal should be rejected to prevent double counting
+    const invalidContribRes = await request(app)
+      .post(`/api/goals/${linkedGoal.id}/contribute`)
+      .set('Cookie', cookies)
+      .send({
+        amountMinorUnits: 10000,
+        sourceAccountId: accId
+      });
+    expect(invalidContribRes.status).toBe(400); // Rejected with clear double-counting prevention message
+
+    // 3. Create an explicit-contribution goal
+    const manualGoalRes = await request(app)
+      .post('/api/goals')
+      .set('Cookie', cookies)
+      .send({
+        name: 'MacBook Pro Fund',
+        targetAmountMinorUnits: 200000,
+        targetDateUtc: targetDate,
+        fundingMode: 'explicit_contribution'
+      });
+    expect(manualGoalRes.status).toBe(201);
+    const manualGoalId = manualGoalRes.body.data.id;
+    expect(manualGoalRes.body.data.currentAmountMinorUnits).toBe(0);
+
+    // 4. Contribute to explicit-contribution goal
+    const contribRes = await request(app)
+      .post(`/api/goals/${manualGoalId}/contribute`)
+      .set('Cookie', cookies)
+      .send({
+        amountMinorUnits: 50000,
+        sourceAccountId: accId
+      });
+    expect(contribRes.status).toBe(200);
+    expect(contribRes.body.data.currentAmountMinorUnits).toBe(50000);
+    expect(contribRes.body.data.progressPercent).toBe(25);
+
+    // Verify source account balance was deducted
+    const accAfter = await request(app)
+      .get(`/api/accounts/${accId}`)
+      .set('Cookie', cookies);
+    expect(accAfter.body.data.balanceMinorUnits).toBe(100000); // 150,000 - 50,000
+  });
+
+  // ==========================================
+  // Phase 6: Financial Analytics & Trends
+  // ==========================================
+  it('should provide comprehensive analytics summary, previous period comparisons, and trends', async () => {
+    const { cookies } = await createSession('analyticsuser@example.com', 'Analytics User');
+
+    const accRes = await request(app)
+      .post('/api/accounts')
+      .set('Cookie', cookies)
+      .send({
+        name: 'Primary Checking',
+        type: 'checking',
+        initialBalanceMinorUnits: 500000
+      });
+    const accId = accRes.body.data.id;
+
+    // Add Income
+    await request(app)
+      .post('/api/transactions')
+      .set('Cookie', cookies)
+      .send({
+        type: 'income',
+        amountMinorUnits: 150000,
+        sourceAccountId: accId,
+        categoryId: 'sys-cat-11',
+        description: 'Monthly Salary'
+      });
+
+    // Add Expenses
+    await request(app)
+      .post('/api/transactions')
+      .set('Cookie', cookies)
+      .send({
+        type: 'expense',
+        amountMinorUnits: 40000,
+        sourceAccountId: accId,
+        categoryId: 'sys-cat-2',
+        description: 'Supermarket Groceries',
+        merchantName: 'Trader Joes'
+      });
+
+    await request(app)
+      .post('/api/transactions')
+      .set('Cookie', cookies)
+      .send({
+        type: 'expense',
+        amountMinorUnits: 20000,
+        sourceAccountId: accId,
+        categoryId: 'sys-cat-3',
+        description: 'Café Lunch'
+      });
+
+    // 1. GET /api/analytics/summary
+    const summaryRes = await request(app)
+      .get('/api/analytics/summary')
+      .set('Cookie', cookies);
+    expect(summaryRes.status).toBe(200);
+    const summary = summaryRes.body.data;
+    expect(summary.monthlyIncomeMinorUnits).toBe(150000);
+    expect(summary.monthlyExpenseMinorUnits).toBe(60000);
+    expect(summary.netSavingsMinorUnits).toBe(90000);
+    expect(summary.savingsRatePct).toBe(60); // 90,000 / 150,000 = 60%
+    expect(summary.largestExpenses.length).toBe(2);
+    expect(summary.largestExpenses[0].amountMinorUnits).toBe(40000);
+    expect(summary.previousPeriod).toBeDefined();
+
+    // 2. GET /api/analytics/trends (daily)
+    const trendsRes = await request(app)
+      .get('/api/analytics/trends?interval=daily')
+      .set('Cookie', cookies);
+    expect(trendsRes.status).toBe(200);
+    expect(Array.isArray(trendsRes.body.data)).toBe(true);
+    expect(trendsRes.body.data.length).toBeGreaterThanOrEqual(1);
+
+    // 3. GET /api/analytics/budget-vs-actual
+    const bvaRes = await request(app)
+      .get('/api/analytics/budget-vs-actual')
+      .set('Cookie', cookies);
+    expect(bvaRes.status).toBe(200);
+    expect(Array.isArray(bvaRes.body.data)).toBe(true);
+
+    // 4. GET /api/reports/monthly
+    const monthlyReportRes = await request(app)
+      .get('/api/reports/monthly')
+      .set('Cookie', cookies);
+    expect(monthlyReportRes.status).toBe(200);
+    expect(monthlyReportRes.body.data.totalIncomeMinorUnits).toBe(150000);
+    expect(monthlyReportRes.body.data.totalExpenseMinorUnits).toBe(60000);
+  });
+
+  // ==========================================
+  // Phase 6: Server-Side PDF & CSV Report Generation
+  // ==========================================
+  it('should stream valid executive PDF statements with %PDF header and export compliant CSV', async () => {
+    const { cookies } = await createSession('reportuser@example.com', 'Report User');
+
+    const accRes = await request(app)
+      .post('/api/accounts')
+      .set('Cookie', cookies)
+      .send({
+        name: 'Report Wallet',
+        type: 'checking',
+        initialBalanceMinorUnits: 200000
+      });
+    const accId = accRes.body.data.id;
+
+    await request(app)
+      .post('/api/transactions')
+      .set('Cookie', cookies)
+      .send({
+        type: 'expense',
+        amountMinorUnits: 25000,
+        sourceAccountId: accId,
+        description: 'Office Equipment',
+        merchantName: 'Dell India'
+      });
+
+    // 1. Test CSV export
+    const csvRes = await request(app)
+      .get('/api/reports/export-csv')
+      .set('Cookie', cookies);
+    expect(csvRes.status).toBe(200);
+    expect(csvRes.headers['content-type']).toContain('text/csv');
+    expect(csvRes.text).toContain('Office Equipment');
+    expect(csvRes.text).toContain('Dell India');
+    expect(csvRes.text).toContain('250.00');
+
+    // 2. Test PDF export
+    const pdfRes = await request(app)
+      .get('/api/reports/export-pdf')
+      .set('Cookie', cookies)
+      .buffer(true)
+      .parse((res, cb) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+        res.on('end', () => cb(null, Buffer.concat(chunks)));
+      });
+
+    expect(pdfRes.status).toBe(200);
+    expect(pdfRes.headers['content-type']).toContain('application/pdf');
+    expect(pdfRes.headers['content-disposition']).toContain('.pdf');
+
+    // Check %PDF magic byte header
+    const pdfBuffer: Buffer = pdfRes.body;
+    expect(pdfBuffer.length).toBeGreaterThan(500);
+    const magicBytes = pdfBuffer.subarray(0, 4).toString('ascii');
+    expect(magicBytes).toBe('%PDF');
+  });
 });
 

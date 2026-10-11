@@ -84,6 +84,7 @@ export const updateTransactionSchema = z.object({
   notes: z.string().trim().max(500).optional(),
   dateUtc: z.string().datetime().optional(),
   paymentMethod: z.enum(['upi', 'credit_card', 'debit_card', 'net_banking', 'cash', 'wallet', 'other']).optional(),
+  status: z.enum(['completed', 'pending', 'cancelled']).optional(),
   tags: z.array(z.string().trim().max(30)).max(10).optional()
 });
 
@@ -109,7 +110,7 @@ export type TransactionQueryInput = z.infer<typeof transactionQuerySchema>;
 // Budget Schemas
 // ==========================================
 export const createBudgetSchema = z.object({
-  categoryId: z.string().min(1, 'Category is required'),
+  categoryId: z.string().optional(), // If omitted or 'OVERALL', represents an overall monthly spending limit
   periodMonth: z.number().int().min(1).max(12),
   periodYear: z.number().int().min(2020).max(2100),
   limitAmountMinorUnits: z.number().int().positive('Budget limit must be positive in minor units'),
@@ -122,7 +123,8 @@ export type CreateBudgetInput = z.infer<typeof createBudgetSchema>;
 
 export const updateBudgetSchema = z.object({
   limitAmountMinorUnits: z.number().int().positive().optional(),
-  alertThresholdPct: z.number().int().min(1).max(100).optional()
+  alertThresholdPct: z.number().int().min(1).max(100).optional(),
+  categoryId: z.string().optional()
 });
 
 export type UpdateBudgetInput = z.infer<typeof updateBudgetSchema>;
@@ -137,6 +139,8 @@ export const createGoalSchema = z.object({
   targetDateUtc: z.string().datetime().optional(),
   color: z.string().trim().max(20).default('#10B981'),
   icon: z.string().trim().max(30).default('Shield'),
+  linkedAccountId: z.string().optional(),
+  fundingMode: z.enum(['explicit_contribution', 'linked_account']).default('explicit_contribution'),
   householdId: z.string().optional()
 });
 
@@ -146,7 +150,11 @@ export const updateGoalSchema = z.object({
   name: z.string().trim().min(1).max(60).optional(),
   targetAmountMinorUnits: z.number().int().positive().optional(),
   targetDateUtc: z.string().datetime().optional(),
-  status: z.enum(['active', 'completed', 'paused', 'archived']).optional()
+  status: z.enum(['active', 'completed', 'paused', 'archived']).optional(),
+  linkedAccountId: z.string().optional(),
+  fundingMode: z.enum(['explicit_contribution', 'linked_account']).optional(),
+  color: z.string().trim().max(20).optional(),
+  icon: z.string().trim().max(30).optional()
 });
 
 export type UpdateGoalInput = z.infer<typeof updateGoalSchema>;
@@ -231,10 +239,29 @@ export type CreateHouseholdInput = z.infer<typeof createHouseholdSchema>;
 
 export const inviteMemberSchema = z.object({
   email: z.string().trim().toLowerCase().email(),
-  role: z.enum(['admin', 'member', 'viewer']).default('member')
+  role: z.enum(['owner', 'editor', 'viewer', 'admin', 'member']).default('editor')
 });
 
 export type InviteMemberInput = z.infer<typeof inviteMemberSchema>;
+
+export const createHouseholdInvitationSchema = z.object({
+  email: z.string().trim().toLowerCase().email('Please enter a valid email address'),
+  role: z.enum(['editor', 'viewer']).default('editor')
+});
+
+export type CreateHouseholdInvitationInput = z.infer<typeof createHouseholdInvitationSchema>;
+
+export const acceptHouseholdInvitationSchema = z.object({
+  token: z.string().trim().min(10, 'Invitation token is required')
+});
+
+export type AcceptHouseholdInvitationInput = z.infer<typeof acceptHouseholdInvitationSchema>;
+
+export const updateHouseholdMemberRoleSchema = z.object({
+  role: z.enum(['editor', 'viewer'])
+});
+
+export type UpdateHouseholdMemberRoleInput = z.infer<typeof updateHouseholdMemberRoleSchema>;
 
 // ==========================================
 // AI Conversation Schemas
@@ -245,3 +272,10 @@ export const createAiConversationSchema = z.object({
 });
 
 export type CreateAiConversationInput = z.infer<typeof createAiConversationSchema>;
+
+export const aiChatQuerySchema = z.object({
+  content: z.string().trim().min(1, 'Message cannot be empty').max(2000, 'Message cannot exceed 2000 characters'),
+  conversationId: z.string().optional()
+});
+
+export type AiChatQueryInput = z.infer<typeof aiChatQuerySchema>;

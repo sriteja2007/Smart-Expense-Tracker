@@ -320,9 +320,18 @@
         }
       }
     },
+    "/api/budgets/check-alerts": {
+      "post": {
+        "summary": "Evaluate budget alert thresholds and emit non-duplicated alerts",
+        "security": [{ "cookieAuth": [] }, { "bearerAuth": [] }],
+        "responses": {
+          "200": { "description": "Budget alerts evaluated and triggered" }
+        }
+      }
+    },
     "/api/goals": {
       "get": {
-        "summary": "List savings goals",
+        "summary": "List savings goals with progress and pace metrics",
         "security": [{ "cookieAuth": [] }, { "bearerAuth": [] }],
         "responses": {
           "200": { "description": "Goals list" }
@@ -331,10 +340,37 @@
     },
     "/api/analytics/summary": {
       "get": {
-        "summary": "Get executive financial KPIs (total balance, monthly income, expense, net savings in minor units)",
+        "summary": "Get executive financial KPIs, previous period comparisons, and top drivers",
         "security": [{ "cookieAuth": [] }, { "bearerAuth": [] }],
         "responses": {
           "200": { "description": "Summary KPIs" }
+        }
+      }
+    },
+    "/api/analytics/trends": {
+      "get": {
+        "summary": "Get daily, weekly or monthly time series financial trends",
+        "security": [{ "cookieAuth": [] }, { "bearerAuth": [] }],
+        "responses": {
+          "200": { "description": "Financial trend points" }
+        }
+      }
+    },
+    "/api/analytics/budget-vs-actual": {
+      "get": {
+        "summary": "Get budget vs actual performance comparison",
+        "security": [{ "cookieAuth": [] }, { "bearerAuth": [] }],
+        "responses": {
+          "200": { "description": "Budget vs actual data" }
+        }
+      }
+    },
+    "/api/reports/monthly": {
+      "get": {
+        "summary": "Get monthly financial executive summary report",
+        "security": [{ "cookieAuth": [] }, { "bearerAuth": [] }],
+        "responses": {
+          "200": { "description": "Monthly report summary" }
         }
       }
     },
@@ -347,12 +383,93 @@
         }
       }
     },
+    "/api/reports/export-pdf": {
+      "get": {
+        "summary": "Generate and stream executive PDF statement",
+        "security": [{ "cookieAuth": [] }, { "bearerAuth": [] }],
+        "responses": {
+          "200": { "description": "PDF stream file" }
+        }
+      }
+    },
     "/api/households": {
       "get": {
         "summary": "List shared budget households",
         "security": [{ "cookieAuth": [] }, { "bearerAuth": [] }],
         "responses": {
           "200": { "description": "Households list" }
+        }
+      }
+    },
+    "/api/ai/insights": {
+      "get": {
+        "summary": "Get deterministic rule-based financial insights and suggestions",
+        "security": [{ "cookieAuth": [] }, { "bearerAuth": [] }],
+        "responses": {
+          "200": { "description": "Financial insight summary" }
+        }
+      }
+    },
+    "/api/ai/chat": {
+      "post": {
+        "summary": "Ask financial assistant questions with grounded ledger context",
+        "security": [{ "cookieAuth": [] }, { "bearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "content": { "type": "string" },
+                  "conversationId": { "type": "string" }
+                },
+                "required": ["content"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "AI advice and conversation state" }
+        }
+      }
+    },
+    "/api/ai/conversations": {
+      "get": {
+        "summary": "List active AI financial conversation threads",
+        "security": [{ "cookieAuth": [] }, { "bearerAuth": [] }],
+        "responses": {
+          "200": { "description": "List of user conversations" }
+        }
+      },
+      "post": {
+        "summary": "Create new AI conversation thread",
+        "security": [{ "cookieAuth": [] }, { "bearerAuth": [] }],
+        "responses": {
+          "201": { "description": "Created conversation" }
+        }
+      }
+    },
+    "/api/receipts/scan": {
+      "post": {
+        "summary": "Upload and scan receipt image via OCR (returns candidates for review)",
+        "security": [{ "cookieAuth": [] }, { "bearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "receipt": { "type": "string", "format": "binary" }
+                },
+                "required": ["receipt"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Candidate merchant, amount, date and category" }
         }
       }
     }

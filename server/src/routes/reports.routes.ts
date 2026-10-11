@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { requireAuth } from '../middlewares/auth.middleware.js';
 import { asyncHandler } from '../middlewares/async.middleware.js';
 import { FinancialRepository } from '../repositories/financial.repository.js';
+import { PdfReportService } from '../services/pdf-report.service.js';
 import { fromMinorUnits, HttpStatus } from '@lumaspend/shared';
 
 export const reportsRouter = Router();
@@ -20,45 +21,48 @@ reportsRouter.get(
     const startOfMonth = new Date(Date.UTC(year, month - 1, 1)).toISOString();
     const endOfMonth = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999)).toISOString();
 
-    const [accounts, budgets, { transactions }] = await Promise.all([
+    const [accounts, budgets, summary, categoryBreakdown, { transactions }] = await Promise.all([
       FinancialRepository.listAccounts(userId),
       FinancialRepository.listBudgets(userId, month, year),
+      FinancialRepository.getAnalyticsSummary(userId, { startDateUtc: startOfMonth, endDateUtc: endOfMonth }),
+      FinancialRepository.getCategoryBreakdown(userId, { month, year }),
       FinancialRepository.listTransactions(userId, {
         startDateUtc: startOfMonth,
         endDateUtc: endOfMonth,
-        limit: 1000
+        limit: 2000
       })
     ]);
-
-    let totalIncome = 0;
-    let totalExpense = 0;
-    for (const t of transactions) {
-      if (t.type === 'income') totalIncome += t.amountMinorUnits;
-      if (t.type === 'expense') totalExpense += t.amountMinorUnits;
-    }
 
     res.status(HttpStatus.OK).json({
       success: true,
       data: {
         period: { month, year },
-        totalIncomeMinorUnits: totalIncome,
-        totalExpenseMinorUnits: totalExpense,
-        netSavingsMinorUnits: totalIncome - totalExpense,
+        totalIncomeMinorUnits: summary.monthlyIncomeMinorUnits,
+        totalExpenseMinorUnits: summary.monthlyExpenseMinorUnits,
+        netSavingsMinorUnits: summary.netSavingsMinorUnits,
+        savingsRatePct: summary.savingsRatePct,
         transactionCount: transactions.length,
         budgets,
-        accounts
+        accounts,
+        categoryBreakdown,
+        summary
       }
     });
   })
 );
 
-// GET /api/reports/export-csv - Stream CSV file of transactions
+// GET /api/reports/export-csv - Stream CSV file of transactions with safe CSV escaping
 reportsRouter.get(
   '/export-csv',
   asyncHandler(async (req, res) => {
     const userId = req.user!.id;
+    const startDateUtc = req.query.startDateUtc as string | undefined;
+    const endDateUtc = req.query.endDateUtc as string | undefined;
+
     const { transactions } = await FinancialRepository.listTransactions(userId, {
-      limit: 1000
+      startDateUtc,
+      endDateUtc,
+      limit: 2000
     });
 
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
@@ -87,5 +91,56 @@ reportsRouter.get(
     }
 
     res.status(HttpStatus.OK).send(csvRows.join('\n'));
+  })
+);
+
+// GET /api/reports/export-pdf - Generate and stream executive PDF financial report
+reportsRouter.get(
+  '/export-pdf',
+  asyncHandler(async (req, res) => {
+    const userId = req.user!.id;
+    const now = new Date();
+    const month = req.query.month ? parseInt(req.query.month as string, 10) : now.getUTCMonth() + 1;
+    const year = req.query.year ? parseInt(req.query.year as string, 10) : now.getUTCFullYear();
+
+    const startOfMonth = new Date(Date.UTC(year, month - 1, 1)).toISOString();
+    const endOfMonth = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999)).toISOString();
+
+    const [accounts, budgets, summary, categoryBreakdown, { transactions }] = await Promise.all([
+      FinancialRepository.listAccounts(userId),
+      FinancialRepository.listBudgets(userId, month, year),
+      FinancialRepository.getAnalyticsSummary(userId, { startDateUtc: startOfMonth, endDateUtc: endOfMonth }),
+      FinancialRepository.getCategoryBreakdown(userId, { month, year }),
+      FinancialRepository.listTransactions(userId, {
+        startDateUtc: startOfMonth,
+        endDateUtc: endOfMonth,
+        limit: 2000
+      })
+    ]);
+
+    const filename = `lumaspend-financial-report-${year}-${String(month).padStart(2, '0')}.pdf`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+    PdfReportService.generateFinancialReportStream(
+      {
+        user: {
+          displayName: req.user!.displayName,
+          email: req.user!.email
+        },
+        period: {
+          month,
+          year,
+          startDateUtc: startOfMonth,
+          endDateUtc: endOfMonth
+        },
+        summary,
+        categoryBreakdown,
+        budgets,
+        transactions,
+        accounts
+      },
+      res
+    );
   })
 );

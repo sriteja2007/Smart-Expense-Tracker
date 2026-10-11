@@ -28,6 +28,20 @@ notificationRouter.patch(
   })
 );
 
+// POST /api/notifications/check-alerts - Run budget, recurring & goal alert evaluations
+notificationRouter.post(
+  '/check-alerts',
+  asyncHandler(async (req, res) => {
+    const userId = req.user!.id;
+    const result = await FinancialRepository.runPeriodicChecks(userId);
+    res.status(HttpStatus.OK).json({
+      success: true,
+      data: result,
+      message: `Evaluated financial alerts. ${result.createdCount} new notifications generated.`
+    });
+  })
+);
+
 // PATCH /api/notifications/:id/read - Mark single notification as read
 notificationRouter.patch(
   '/:id/read',
@@ -41,3 +55,19 @@ notificationRouter.patch(
     res.status(HttpStatus.OK).json({ success: true, message: 'Notification marked as read.' });
   })
 );
+
+// DELETE /api/notifications/:id - Delete single notification
+notificationRouter.delete(
+  '/:id',
+  asyncHandler(async (req, res) => {
+    const userId = req.user!.id;
+    const id = req.params.id as string;
+    const deleted = await FinancialRepository.deleteNotification(id, userId);
+    if (!deleted) {
+      throw AppError.notFound('Notification not found.');
+    }
+    res.status(HttpStatus.OK).json({ success: true, message: 'Notification dismissed.' });
+  })
+);
+
+

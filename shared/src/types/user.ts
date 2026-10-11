@@ -8,8 +8,13 @@ export interface UserPreferences {
   defaultCurrency: CurrencyCode;
   theme: 'dark' | 'light' | 'system';
   reducedMotion: boolean;
+  timezone?: string; // e.g. 'Asia/Kolkata', 'UTC'
+  inAppNotifications?: boolean;
   budgetAlertsEnabled: boolean;
+  recurringRemindersEnabled?: boolean;
+  goalMilestonesEnabled?: boolean;
   weeklySummaryEmail: boolean;
+  browserPushEnabled?: boolean;
 }
 
 export interface UserProfile {

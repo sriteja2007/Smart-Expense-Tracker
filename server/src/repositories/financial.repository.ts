@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import crypto from 'crypto';
 import { Account } from '../models/account.model.js';
 import { Category } from '../models/category.model.js';
 import { TransactionModel } from '../models/transaction.model.js';
@@ -8,7 +9,8 @@ import { Recurring } from '../models/recurring.model.js';
 import { HouseholdModel } from '../models/household.model.js';
 import { NotificationModel } from '../models/notification.model.js';
 import { AiConversationModel } from '../models/ai-conversation.model.js';
-import { AppError, toMinorUnits, formatMinorUnits } from '@lumaspend/shared';
+import { UserRepository } from './user.repository.js';
+import { AppError, toMinorUnits, fromMinorUnits, formatCurrency, formatMinorUnits } from '@lumaspend/shared';
 import type {
   FinancialAccount,
   FinancialCategory,
@@ -19,7 +21,12 @@ import type {
   RecurringFrequency,
   Household,
   HouseholdRole,
+  HouseholdMember,
+  HouseholdInvitation,
+  HouseholdAuditLog,
+  UserDataExport,
   Notification,
+  NotificationType,
   AiConversation,
   TransactionQueryInput,
   CreateTransactionInput,
@@ -30,11 +37,20 @@ import type {
   CreateRecurringInput,
   CreateHouseholdInput,
   InviteMemberInput,
+  CreateHouseholdInvitationInput,
   CreateAiConversationInput,
   CsvImportRow,
   CsvImportPreviewResult,
   CsvImportPreviewInput,
-  CsvImportConfirmInput
+  CsvImportConfirmInput,
+  AnalyticsSummaryData,
+  AnalyticsPreviousPeriodComparison,
+  LargestExpenseItem,
+  FrequentCategoryItem,
+  AnalyticsTrendPoint,
+  CategoryBreakdownItem,
+  BudgetVsActualItem,
+  AiInsightSummary
 } from '@lumaspend/shared';
 
 // Default system categories
@@ -310,6 +326,11 @@ export class FinancialRepository {
     userId: string,
     input: CreateTransactionInput
   ): Promise<Transaction> {
+    // 0. If scoped to a household, verify user has editor or owner role
+    if (input.householdId) {
+      await this.validateHouseholdAccess(input.householdId, userId, 'editor');
+    }
+
     // 1. Verify source account exists and belongs to user
     const sourceAcc = await this.getAccountById(input.sourceAccountId, userId);
     if (!sourceAcc) {
@@ -397,21 +418,31 @@ export class FinancialRepository {
     const page = query.page || 1;
     const limit = query.limit || 20;
 
+    if (query.householdId) {
+      await this.validateHouseholdAccess(query.householdId, userId, 'viewer');
+    }
+
     if (this.isDbConnected()) {
-      const filter: any = { userId };
+      const filter: any = query.householdId
+        ? { householdId: query.householdId }
+        : {
+            userId,
+            $or: [{ householdId: { $exists: false } }, { householdId: null }, { householdId: '' }]
+          };
+
       if (query.type) filter.type = query.type;
       if (query.sourceAccountId) filter.sourceAccountId = query.sourceAccountId;
       if (query.categoryId) filter.categoryId = query.categoryId;
-      if (query.householdId) filter.householdId = query.householdId;
       if (query.startDateUtc || query.endDateUtc) {
         filter.dateUtc = {};
         if (query.startDateUtc) filter.dateUtc.$gte = new Date(query.startDateUtc);
         if (query.endDateUtc) filter.dateUtc.$lte = new Date(query.endDateUtc);
       }
       if (query.search) {
+        const safeRegex = query.search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         filter.$or = [
-          { description: { $regex: query.search, $options: 'i' } },
-          { merchantName: { $regex: query.search, $options: 'i' } }
+          { description: { $regex: safeRegex, $options: 'i' } },
+          { merchantName: { $regex: safeRegex, $options: 'i' } }
         ];
       }
 
@@ -437,11 +468,14 @@ export class FinancialRepository {
 
     let all: Transaction[] = [];
     for (const t of memoryTransactions.values()) {
-      if (t.userId !== userId) continue;
+      if (query.householdId) {
+        if (t.householdId !== query.householdId) continue;
+      } else {
+        if (t.userId !== userId || t.householdId) continue;
+      }
       if (query.type && t.type !== query.type) continue;
       if (query.sourceAccountId && t.sourceAccountId !== query.sourceAccountId) continue;
       if (query.categoryId && t.categoryId !== query.categoryId) continue;
-      if (query.householdId && t.householdId !== query.householdId) continue;
       if (query.startDateUtc && new Date(t.dateUtc) < new Date(query.startDateUtc)) continue;
       if (query.endDateUtc && new Date(t.dateUtc) > new Date(query.endDateUtc)) continue;
       if (query.search) {
@@ -515,24 +549,30 @@ export class FinancialRepository {
       }
     }
 
-    // 1. Revert old transaction balance impact
-    if (existing.type === 'expense') {
-      await this.adjustAccountBalance(existing.sourceAccountId, existing.amountMinorUnits);
-    } else if (existing.type === 'income') {
-      await this.adjustAccountBalance(existing.sourceAccountId, -existing.amountMinorUnits);
-    } else if (existing.type === 'transfer' && existing.destinationAccountId) {
-      await this.adjustAccountBalance(existing.sourceAccountId, existing.amountMinorUnits);
-      await this.adjustAccountBalance(existing.destinationAccountId, -existing.amountMinorUnits);
+    const newStatus = updates.status || existing.status;
+
+    // 1. Revert old transaction balance impact if it wasn't already cancelled
+    if (existing.status !== 'cancelled') {
+      if (existing.type === 'expense') {
+        await this.adjustAccountBalance(existing.sourceAccountId, existing.amountMinorUnits);
+      } else if (existing.type === 'income') {
+        await this.adjustAccountBalance(existing.sourceAccountId, -existing.amountMinorUnits);
+      } else if (existing.type === 'transfer' && existing.destinationAccountId) {
+        await this.adjustAccountBalance(existing.sourceAccountId, existing.amountMinorUnits);
+        await this.adjustAccountBalance(existing.destinationAccountId, -existing.amountMinorUnits);
+      }
     }
 
-    // 2. Apply new transaction balance impact
-    if (newType === 'expense') {
-      await this.adjustAccountBalance(newSourceAccountId, -newAmount);
-    } else if (newType === 'income') {
-      await this.adjustAccountBalance(newSourceAccountId, newAmount);
-    } else if (newType === 'transfer' && newDestAccountId) {
-      await this.adjustAccountBalance(newSourceAccountId, -newAmount);
-      await this.adjustAccountBalance(newDestAccountId, newAmount);
+    // 2. Apply new transaction balance impact only if new status is not cancelled
+    if (newStatus !== 'cancelled') {
+      if (newType === 'expense') {
+        await this.adjustAccountBalance(newSourceAccountId, -newAmount);
+      } else if (newType === 'income') {
+        await this.adjustAccountBalance(newSourceAccountId, newAmount);
+      } else if (newType === 'transfer' && newDestAccountId) {
+        await this.adjustAccountBalance(newSourceAccountId, -newAmount);
+        await this.adjustAccountBalance(newDestAccountId, newAmount);
+      }
     }
 
     // 3. Persist updates
@@ -550,6 +590,7 @@ export class FinancialRepository {
       if (updates.notes !== undefined) (doc as any).notes = updates.notes;
       if (updates.dateUtc) doc.dateUtc = new Date(updates.dateUtc);
       if (updates.paymentMethod) doc.paymentMethod = updates.paymentMethod;
+      if (updates.status) doc.status = updates.status;
       if (updates.tags) doc.tags = updates.tags;
 
       await doc.save();
@@ -568,6 +609,7 @@ export class FinancialRepository {
       notes: updates.notes !== undefined ? updates.notes : existing.notes,
       dateUtc: updates.dateUtc || existing.dateUtc,
       paymentMethod: updates.paymentMethod || existing.paymentMethod,
+      status: newStatus,
       tags: updates.tags || existing.tags,
       updatedAt: new Date().toISOString()
     };
@@ -602,10 +644,12 @@ export class FinancialRepository {
   // Budgets
   // ==========================================
   static async createBudget(userId: string, input: CreateBudgetInput): Promise<Budget> {
+    const categoryId = input.categoryId || 'OVERALL';
+
     if (this.isDbConnected()) {
       const existing = await BudgetModel.findOne({
         userId,
-        categoryId: input.categoryId,
+        categoryId,
         periodMonth: input.periodMonth,
         periodYear: input.periodYear
       }).exec();
@@ -617,7 +661,7 @@ export class FinancialRepository {
       const doc = await BudgetModel.create({
         userId,
         householdId: input.householdId,
-        categoryId: input.categoryId,
+        categoryId,
         periodMonth: input.periodMonth,
         periodYear: input.periodYear,
         limitAmountMinorUnits: input.limitAmountMinorUnits,
@@ -628,9 +672,10 @@ export class FinancialRepository {
     }
 
     for (const b of memoryBudgets.values()) {
+      const existingCat = b.categoryId || 'OVERALL';
       if (
         b.userId === userId &&
-        b.categoryId === input.categoryId &&
+        existingCat === categoryId &&
         b.periodMonth === input.periodMonth &&
         b.periodYear === input.periodYear
       ) {
@@ -644,13 +689,16 @@ export class FinancialRepository {
       id,
       userId,
       householdId: input.householdId,
-      categoryId: input.categoryId,
+      categoryId: categoryId === 'OVERALL' ? undefined : categoryId,
       periodMonth: input.periodMonth,
       periodYear: input.periodYear,
       limitAmountMinorUnits: input.limitAmountMinorUnits,
       currency: input.currency,
       alertThresholdPct: input.alertThresholdPct,
       spentAmountMinorUnits: 0,
+      remainingAmountMinorUnits: input.limitAmountMinorUnits,
+      consumedPercent: 0,
+      isExceeded: false,
       createdAt: now,
       updatedAt: now
     };
@@ -677,20 +725,24 @@ export class FinancialRepository {
       }
     }
 
-    // 2. Calculate actual spending per category for this month
+    // 2. Calculate actual spending per category and overall for this month
+    // Strictly eligible expense transactions: type === 'expense' && status !== 'cancelled'
     const startOfMonth = new Date(Date.UTC(periodYear, periodMonth - 1, 1));
     const endOfMonth = new Date(Date.UTC(periodYear, periodMonth, 0, 23, 59, 59, 999));
 
     const spendingByCategory = new Map<string, number>();
+    let totalExpenseMinorUnits = 0;
 
     if (this.isDbConnected()) {
       const txns = await TransactionModel.find({
         userId,
         type: 'expense',
+        status: { $ne: 'cancelled' },
         dateUtc: { $gte: startOfMonth, $lte: endOfMonth }
       }).exec();
 
       for (const t of txns) {
+        totalExpenseMinorUnits += t.amountMinorUnits;
         if (t.categoryId) {
           const current = spendingByCategory.get(t.categoryId) || 0;
           spendingByCategory.set(t.categoryId, current + t.amountMinorUnits);
@@ -701,32 +753,60 @@ export class FinancialRepository {
         if (
           t.userId === userId &&
           t.type === 'expense' &&
-          t.categoryId &&
+          t.status !== 'cancelled' &&
           new Date(t.dateUtc) >= startOfMonth &&
           new Date(t.dateUtc) <= endOfMonth
         ) {
-          const current = spendingByCategory.get(t.categoryId) || 0;
-          spendingByCategory.set(t.categoryId, current + t.amountMinorUnits);
+          totalExpenseMinorUnits += t.amountMinorUnits;
+          if (t.categoryId) {
+            const current = spendingByCategory.get(t.categoryId) || 0;
+            spendingByCategory.set(t.categoryId, current + t.amountMinorUnits);
+          }
         }
       }
     }
 
-    return budgets.map((b) => ({
-      ...b,
-      spentAmountMinorUnits: spendingByCategory.get(b.categoryId) || 0
-    }));
+    return budgets.map((b) => {
+      const isOverall = !b.categoryId || b.categoryId === 'OVERALL';
+      const spentAmountMinorUnits = isOverall
+        ? totalExpenseMinorUnits
+        : spendingByCategory.get(b.categoryId!) || 0;
+
+      const remainingAmountMinorUnits = Math.max(0, b.limitAmountMinorUnits - spentAmountMinorUnits);
+      const consumedPercent =
+        b.limitAmountMinorUnits > 0
+          ? Number(((spentAmountMinorUnits / b.limitAmountMinorUnits) * 100).toFixed(1))
+          : 0;
+      const isExceeded = spentAmountMinorUnits > b.limitAmountMinorUnits;
+
+      return {
+        ...b,
+        spentAmountMinorUnits,
+        remainingAmountMinorUnits,
+        consumedPercent,
+        isExceeded
+      };
+    });
   }
 
   static async getBudgetById(id: string, userId: string): Promise<Budget | null> {
+    let rawBudget: Budget | null = null;
     if (this.isDbConnected()) {
       const doc = await BudgetModel.findById(id).exec();
       if (!doc || doc.userId !== userId) return null;
-      return doc.toBudget(0);
+      rawBudget = doc.toBudget(0);
+    } else {
+      const b = memoryBudgets.get(id);
+      if (!b || b.userId !== userId) return null;
+      rawBudget = b;
     }
 
-    const b = memoryBudgets.get(id);
-    if (!b || b.userId !== userId) return null;
-    return b;
+    if (!rawBudget) return null;
+
+    // Recalculate spending for this budget's period
+    const list = await this.listBudgets(userId, rawBudget.periodMonth, rawBudget.periodYear);
+    const found = list.find((b) => b.id === id);
+    return found || rawBudget;
   }
 
   static async updateBudget(
@@ -740,7 +820,7 @@ export class FinancialRepository {
       if (updates.limitAmountMinorUnits) doc.limitAmountMinorUnits = updates.limitAmountMinorUnits;
       if (updates.alertThresholdPct) doc.alertThresholdPct = updates.alertThresholdPct;
       await doc.save();
-      return doc.toBudget(0);
+      return this.getBudgetById(id, userId);
     }
 
     const b = memoryBudgets.get(id);
@@ -751,7 +831,7 @@ export class FinancialRepository {
       updatedAt: new Date().toISOString()
     };
     memoryBudgets.set(id, updated);
-    return updated;
+    return this.getBudgetById(id, userId);
   }
 
   static async deleteBudget(id: string, userId: string): Promise<boolean> {
@@ -766,40 +846,142 @@ export class FinancialRepository {
     return true;
   }
 
+  static async checkAndTriggerBudgetAlerts(
+    userId: string,
+    periodMonth: number,
+    periodYear: number
+  ): Promise<Notification[]> {
+    const budgets = await this.listBudgets(userId, periodMonth, periodYear);
+    const categories = await this.listCategories(userId);
+    const catMap = new Map(categories.map((c) => [c.id, c.name]));
+
+    const existingNotifications = await this.listNotifications(userId);
+    const triggered: Notification[] = [];
+
+    for (const budget of budgets) {
+      const thresholdsToCheck = Array.from(
+        new Set([budget.alertThresholdPct, 75, 90, 100])
+      ).sort((a, b) => a - b);
+
+      const consumedPct = budget.consumedPercent || 0;
+      const catName = budget.categoryId ? (catMap.get(budget.categoryId) || 'Category') : 'Overall Monthly Budget';
+
+      for (const threshold of thresholdsToCheck) {
+        if (consumedPct >= threshold) {
+          // Check if an alert for this budget, period, and threshold already exists
+          const alreadyTriggered = existingNotifications.some((n) => {
+            return (
+              n.type === 'budget_alert' &&
+              n.metadata?.budgetId === budget.id &&
+              n.metadata?.periodMonth === periodMonth &&
+              n.metadata?.periodYear === periodYear &&
+              n.metadata?.thresholdPct === threshold
+            );
+          });
+
+          if (!alreadyTriggered) {
+            const formattedSpent = formatMinorUnits(budget.spentAmountMinorUnits || 0, budget.currency);
+            const formattedLimit = formatMinorUnits(budget.limitAmountMinorUnits, budget.currency);
+
+            const title = consumedPct >= 100
+              ? `Budget Exceeded: ${catName}`
+              : `Budget Alert: ${catName} (${threshold}% Reached)`;
+
+            const message = consumedPct >= 100
+              ? `You have exceeded your ${catName} budget for ${periodMonth}/${periodYear}. Spent: ${formattedSpent} (Limit: ${formattedLimit}).`
+              : `You have consumed ${consumedPct}% of your ${catName} budget for ${periodMonth}/${periodYear} (${formattedSpent} of ${formattedLimit}).`;
+
+            const notif = await this.createNotification(userId, 'budget_alert', title, message, {
+              budgetId: budget.id,
+              categoryId: budget.categoryId,
+              periodMonth,
+              periodYear,
+              thresholdPct: threshold,
+              consumedPercent: consumedPct,
+              spentAmountMinorUnits: budget.spentAmountMinorUnits,
+              limitAmountMinorUnits: budget.limitAmountMinorUnits
+            });
+
+            triggered.push(notif);
+            existingNotifications.push(notif);
+          }
+        }
+      }
+    }
+
+    return triggered;
+  }
+
   // ==========================================
   // Savings Goals
   // ==========================================
   static async createGoal(userId: string, input: CreateGoalInput): Promise<SavingsGoal> {
+    const isLinked = input.fundingMode === 'linked_account' && !!input.linkedAccountId;
+    let linkedBalance = 0;
+    if (isLinked && input.linkedAccountId) {
+      const acc = await this.getAccountById(input.linkedAccountId, userId);
+      if (acc) linkedBalance = acc.balanceMinorUnits;
+    }
+
     if (this.isDbConnected()) {
       const doc = await Goal.create({
         userId,
         householdId: input.householdId,
         name: input.name,
         targetAmountMinorUnits: input.targetAmountMinorUnits,
-        currentAmountMinorUnits: 0,
+        currentAmountMinorUnits: isLinked ? linkedBalance : 0,
         currency: input.currency,
         targetDateUtc: input.targetDateUtc ? new Date(input.targetDateUtc) : undefined,
         color: input.color,
         icon: input.icon,
+        linkedAccountId: input.linkedAccountId,
+        fundingMode: input.fundingMode || 'explicit_contribution',
         status: 'active'
       });
-      return doc.toGoal();
+      return doc.toGoal(isLinked ? linkedBalance : undefined);
     }
 
     const id = new mongoose.Types.ObjectId().toString();
     const now = new Date().toISOString();
+    const currentAmount = isLinked ? linkedBalance : 0;
+    const progressPercent = Math.min(100, Math.round((currentAmount / input.targetAmountMinorUnits) * 100));
+
+    let daysRemaining: number | undefined;
+    let requiredDailyPaceMinorUnits: number | undefined;
+    let requiredMonthlyPaceMinorUnits: number | undefined;
+
+    if (input.targetDateUtc) {
+      const diffMs = new Date(input.targetDateUtc).getTime() - Date.now();
+      daysRemaining = Math.max(0, Math.ceil(diffMs / (1000 * 60 * 60 * 24)));
+      const needed = Math.max(0, input.targetAmountMinorUnits - currentAmount);
+
+      if (daysRemaining > 0 && needed > 0) {
+        requiredDailyPaceMinorUnits = Math.ceil(needed / daysRemaining);
+        requiredMonthlyPaceMinorUnits = Math.ceil(needed / Math.max(1, daysRemaining / 30.44));
+      } else if (needed === 0) {
+        requiredDailyPaceMinorUnits = 0;
+        requiredMonthlyPaceMinorUnits = 0;
+      }
+    }
+
     const goal: SavingsGoal = {
       id,
       userId,
       householdId: input.householdId,
       name: input.name,
       targetAmountMinorUnits: input.targetAmountMinorUnits,
-      currentAmountMinorUnits: 0,
+      currentAmountMinorUnits: currentAmount,
       currency: input.currency,
       targetDateUtc: input.targetDateUtc,
       color: input.color,
       icon: input.icon,
-      status: 'active',
+      linkedAccountId: input.linkedAccountId,
+      fundingMode: input.fundingMode || 'explicit_contribution',
+      status: currentAmount >= input.targetAmountMinorUnits ? 'completed' : 'active',
+      progressPercent,
+      requiredDailyPaceMinorUnits,
+      requiredMonthlyPaceMinorUnits,
+      daysRemaining,
       createdAt: now,
       updatedAt: now
     };
@@ -808,28 +990,107 @@ export class FinancialRepository {
   }
 
   static async listGoals(userId: string): Promise<SavingsGoal[]> {
+    const accounts = await this.listAccounts(userId);
+    const accountMap = new Map(accounts.map((a) => [a.id, a.balanceMinorUnits]));
+
     if (this.isDbConnected()) {
       const docs = await Goal.find({ userId }).sort({ createdAt: -1 }).exec();
-      return docs.map((d) => d.toGoal());
+      return docs.map((d) => {
+        const isLinked = d.fundingMode === 'linked_account' && d.linkedAccountId;
+        const accBal = isLinked && d.linkedAccountId ? accountMap.get(d.linkedAccountId) : undefined;
+        return d.toGoal(accBal);
+      });
     }
 
     const goals: SavingsGoal[] = [];
     for (const g of memoryGoals.values()) {
-      if (g.userId === userId) goals.push(g);
+      if (g.userId === userId) {
+        const isLinked = g.fundingMode === 'linked_account' && g.linkedAccountId;
+        const accBal = isLinked && g.linkedAccountId ? accountMap.get(g.linkedAccountId) : undefined;
+        const currentAmount = accBal !== undefined ? Math.max(0, accBal) : g.currentAmountMinorUnits;
+        const progressPercent = Math.min(100, Math.round((currentAmount / g.targetAmountMinorUnits) * 100));
+
+        let daysRemaining: number | undefined;
+        let requiredDailyPaceMinorUnits: number | undefined;
+        let requiredMonthlyPaceMinorUnits: number | undefined;
+
+        if (g.targetDateUtc) {
+          const diffMs = new Date(g.targetDateUtc).getTime() - Date.now();
+          daysRemaining = Math.max(0, Math.ceil(diffMs / (1000 * 60 * 60 * 24)));
+          const needed = Math.max(0, g.targetAmountMinorUnits - currentAmount);
+
+          if (daysRemaining > 0 && needed > 0) {
+            requiredDailyPaceMinorUnits = Math.ceil(needed / daysRemaining);
+            requiredMonthlyPaceMinorUnits = Math.ceil(needed / Math.max(1, daysRemaining / 30.44));
+          } else if (needed === 0) {
+            requiredDailyPaceMinorUnits = 0;
+            requiredMonthlyPaceMinorUnits = 0;
+          }
+        }
+
+        const status = currentAmount >= g.targetAmountMinorUnits ? 'completed' : g.status;
+
+        goals.push({
+          ...g,
+          currentAmountMinorUnits: currentAmount,
+          progressPercent,
+          requiredDailyPaceMinorUnits,
+          requiredMonthlyPaceMinorUnits,
+          daysRemaining,
+          status
+        });
+      }
     }
     return goals;
   }
 
   static async getGoalById(id: string, userId: string): Promise<SavingsGoal | null> {
+    const accounts = await this.listAccounts(userId);
+    const accountMap = new Map(accounts.map((a) => [a.id, a.balanceMinorUnits]));
+
     if (this.isDbConnected()) {
       const doc = await Goal.findById(id).exec();
       if (!doc || doc.userId !== userId) return null;
-      return doc.toGoal();
+      const isLinked = doc.fundingMode === 'linked_account' && doc.linkedAccountId;
+      const accBal = isLinked && doc.linkedAccountId ? accountMap.get(doc.linkedAccountId) : undefined;
+      return doc.toGoal(accBal);
     }
 
     const g = memoryGoals.get(id);
     if (!g || g.userId !== userId) return null;
-    return g;
+
+    const isLinked = g.fundingMode === 'linked_account' && g.linkedAccountId;
+    const accBal = isLinked && g.linkedAccountId ? accountMap.get(g.linkedAccountId) : undefined;
+    const currentAmount = accBal !== undefined ? Math.max(0, accBal) : g.currentAmountMinorUnits;
+    const progressPercent = Math.min(100, Math.round((currentAmount / g.targetAmountMinorUnits) * 100));
+
+    let daysRemaining: number | undefined;
+    let requiredDailyPaceMinorUnits: number | undefined;
+    let requiredMonthlyPaceMinorUnits: number | undefined;
+
+    if (g.targetDateUtc) {
+      const diffMs = new Date(g.targetDateUtc).getTime() - Date.now();
+      daysRemaining = Math.max(0, Math.ceil(diffMs / (1000 * 60 * 60 * 24)));
+      const needed = Math.max(0, g.targetAmountMinorUnits - currentAmount);
+
+      if (daysRemaining > 0 && needed > 0) {
+        requiredDailyPaceMinorUnits = Math.ceil(needed / daysRemaining);
+        requiredMonthlyPaceMinorUnits = Math.ceil(needed / Math.max(1, daysRemaining / 30.44));
+      } else if (needed === 0) {
+        requiredDailyPaceMinorUnits = 0;
+        requiredMonthlyPaceMinorUnits = 0;
+      }
+    }
+
+    return {
+      ...g,
+      currentAmountMinorUnits: currentAmount,
+      progressPercent,
+      requiredDailyPaceMinorUnits,
+      requiredMonthlyPaceMinorUnits,
+      daysRemaining,
+      status: currentAmount >= g.targetAmountMinorUnits ? 'completed' : g.status
+    };
   }
 
   static async updateGoal(
@@ -844,8 +1105,10 @@ export class FinancialRepository {
       if (updates.targetAmountMinorUnits) doc.targetAmountMinorUnits = updates.targetAmountMinorUnits;
       if (updates.targetDateUtc) doc.targetDateUtc = new Date(updates.targetDateUtc);
       if (updates.status) doc.status = updates.status;
+      if (updates.linkedAccountId !== undefined) doc.linkedAccountId = updates.linkedAccountId;
+      if (updates.fundingMode) doc.fundingMode = updates.fundingMode;
       await doc.save();
-      return doc.toGoal();
+      return this.getGoalById(id, userId);
     }
 
     const g = memoryGoals.get(id);
@@ -856,7 +1119,7 @@ export class FinancialRepository {
       updatedAt: new Date().toISOString()
     };
     memoryGoals.set(id, updated);
-    return updated;
+    return this.getGoalById(id, userId);
   }
 
   static async contributeToGoal(
@@ -871,6 +1134,13 @@ export class FinancialRepository {
     const sourceAcc = await this.getAccountById(sourceAccountId, userId);
     if (!sourceAcc) throw AppError.notFound('Source account not found.');
 
+    // If fundingMode is linked_account, prevent double counting
+    if (goal.fundingMode === 'linked_account') {
+      throw AppError.badRequest(
+        'This goal is funded directly by a linked account balance. Deposit or transfer money to that account instead.'
+      );
+    }
+
     // Deduct from account
     await this.adjustAccountBalance(sourceAccountId, -amountMinorUnits);
 
@@ -883,7 +1153,7 @@ export class FinancialRepository {
         doc.currentAmountMinorUnits = newCurrent;
         if (isCompleted) doc.status = 'completed';
         await doc.save();
-        return doc.toGoal();
+        return this.getGoalById(goalId, userId) as Promise<SavingsGoal>;
       }
     }
 
@@ -891,6 +1161,7 @@ export class FinancialRepository {
       ...goal,
       currentAmountMinorUnits: newCurrent,
       status: isCompleted ? 'completed' : goal.status,
+      progressPercent: Math.min(100, Math.round((newCurrent / goal.targetAmountMinorUnits) * 100)),
       updatedAt: new Date().toISOString()
     };
     memoryGoals.set(goalId, updated);
@@ -1372,12 +1643,22 @@ export class FinancialRepository {
     ownerName: string,
     input: CreateHouseholdInput
   ): Promise<Household> {
-    const ownerMember = {
+    const ownerMember: HouseholdMember = {
       userId: ownerId,
       email: ownerEmail,
       displayName: ownerName,
       role: 'owner' as HouseholdRole,
       joinedAt: new Date().toISOString()
+    };
+
+    const initialAudit: HouseholdAuditLog = {
+      id: new mongoose.Types.ObjectId().toString(),
+      action: 'household_created',
+      actorUserId: ownerId,
+      actorName: ownerName,
+      role: 'owner',
+      details: `Created household "${input.name}"`,
+      timestamp: new Date().toISOString()
     };
 
     if (this.isDbConnected()) {
@@ -1388,6 +1669,13 @@ export class FinancialRepository {
           {
             ...ownerMember,
             joinedAt: new Date(ownerMember.joinedAt)
+          }
+        ],
+        invitations: [],
+        auditLogs: [
+          {
+            ...initialAudit,
+            timestamp: new Date(initialAudit.timestamp)
           }
         ],
         currency: input.currency
@@ -1402,6 +1690,8 @@ export class FinancialRepository {
       name: input.name,
       ownerId,
       members: [ownerMember],
+      invitations: [],
+      auditLogs: [initialAudit],
       currency: input.currency,
       createdAt: now,
       updatedAt: now
@@ -1425,15 +1715,17 @@ export class FinancialRepository {
     return list;
   }
 
-  static async getHouseholdById(id: string, userId: string): Promise<Household | null> {
+  static async getHouseholdById(id: string, userId?: string): Promise<Household | null> {
     if (this.isDbConnected()) {
       const doc = await HouseholdModel.findById(id).exec();
-      if (!doc || !doc.members.some((m) => m.userId === userId)) return null;
+      if (!doc) return null;
+      if (userId && !doc.members.some((m) => m.userId === userId)) return null;
       return doc.toHousehold();
     }
 
     const hh = memoryHouseholds.get(id);
-    if (!hh || !hh.members.some((m) => m.userId === userId)) return null;
+    if (!hh) return null;
+    if (userId && !hh.members.some((m) => m.userId === userId)) return null;
     return hh;
   }
 
@@ -1442,48 +1734,399 @@ export class FinancialRepository {
     return !!hh;
   }
 
-  static async inviteMember(
+  static async validateHouseholdAccess(
     householdId: string,
-    inviterUserId: string,
-    input: InviteMemberInput,
-    invitee: { id: string; displayName: string }
+    userId: string,
+    requiredRole: 'viewer' | 'editor' | 'owner' = 'viewer'
   ): Promise<Household> {
-    const hh = await this.getHouseholdById(householdId, inviterUserId);
-    if (!hh) throw AppError.notFound('Household not found.');
-
-    const inviter = hh.members.find((m) => m.userId === inviterUserId);
-    if (!inviter || (inviter.role !== 'owner' && inviter.role !== 'admin')) {
-      throw AppError.forbidden('Only household owner or admins can invite members.');
+    const hh = await this.getHouseholdById(householdId, userId);
+    if (!hh) {
+      throw AppError.notFound('Household not found or you are not a member.');
     }
 
-    if (hh.members.some((m) => m.userId === invitee.id)) {
+    const member = hh.members.find((m) => m.userId === userId);
+    if (!member) {
+      throw AppError.forbidden('You are not a member of this household.');
+    }
+
+    if (requiredRole === 'owner') {
+      if (member.role !== 'owner') {
+        throw AppError.forbidden('Only the household owner can perform this action.');
+      }
+    } else if (requiredRole === 'editor') {
+      if (member.role === 'viewer') {
+        throw AppError.forbidden('Viewers have read-only access and cannot modify household financial data.');
+      }
+    }
+
+    return hh;
+  }
+
+  static async inviteMember(
+    householdId: string,
+    inviterId: string,
+    input: InviteMemberInput,
+    targetUser: { id: string; displayName: string }
+  ): Promise<Household> {
+    const hh = await this.validateHouseholdAccess(householdId, inviterId, 'owner');
+    if (hh.members.some((m) => m.userId === targetUser.id)) {
+      throw AppError.conflict('User is already a member of this household.');
+    }
+    const role = (input.role === 'admin' ? 'editor' : input.role === 'member' ? 'viewer' : input.role) as HouseholdRole;
+    const newMember: HouseholdMember = {
+      userId: targetUser.id,
+      email: input.email.toLowerCase().trim(),
+      displayName: targetUser.displayName,
+      role: role || 'editor',
+      joinedAt: new Date().toISOString()
+    };
+    if (this.isDbConnected()) {
+      const doc = await HouseholdModel.findById(householdId).exec();
+      if (!doc) throw AppError.notFound('Household not found.');
+      doc.members.push({
+        ...newMember,
+        joinedAt: new Date(newMember.joinedAt)
+      });
+      await doc.save();
+      return doc.toHousehold();
+    }
+    hh.members.push(newMember);
+    hh.updatedAt = new Date().toISOString();
+    memoryHouseholds.set(householdId, hh);
+    return hh;
+  }
+
+  static async createHouseholdInvitation(
+    householdId: string,
+    inviterUserId: string,
+    inviterName: string,
+    input: CreateHouseholdInvitationInput
+  ): Promise<{ invitation: HouseholdInvitation; inviteLink: string }> {
+    const hh = await this.validateHouseholdAccess(householdId, inviterUserId, 'owner');
+
+    const normalizedEmail = input.email.toLowerCase().trim();
+    if (hh.members.some((m) => m.email.toLowerCase() === normalizedEmail)) {
       throw AppError.conflict('User is already a member of this household.');
     }
 
-    const newMember = {
-      userId: invitee.id,
-      email: input.email,
-      displayName: invitee.displayName,
+    const token = crypto.randomBytes(24).toString('hex');
+    const id = new mongoose.Types.ObjectId().toString();
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000); // 7 days
+
+    const invitation: HouseholdInvitation = {
+      id,
+      householdId,
+      householdName: hh.name,
+      inviterUserId,
+      inviterName,
+      inviteeEmail: normalizedEmail,
       role: input.role,
-      joinedAt: new Date().toISOString()
+      token,
+      status: 'pending',
+      expiresAt: expiresAt.toISOString(),
+      createdAt: now.toISOString()
+    };
+
+    const auditEntry: HouseholdAuditLog = {
+      id: new mongoose.Types.ObjectId().toString(),
+      action: 'member_invited',
+      actorUserId: inviterUserId,
+      actorName: inviterName,
+      targetEmail: normalizedEmail,
+      role: input.role,
+      details: `Invited ${normalizedEmail} as ${input.role}`,
+      timestamp: now.toISOString()
     };
 
     if (this.isDbConnected()) {
       const doc = await HouseholdModel.findById(householdId).exec();
       if (doc) {
+        doc.invitations.push({
+          ...invitation,
+          expiresAt: new Date(invitation.expiresAt),
+          createdAt: new Date(invitation.createdAt)
+        });
+        doc.auditLogs.push({
+          ...auditEntry,
+          timestamp: new Date(auditEntry.timestamp)
+        });
+        await doc.save();
+      }
+    } else {
+      hh.invitations = [...(hh.invitations || []), invitation];
+      hh.auditLogs = [...(hh.auditLogs || []), auditEntry];
+      hh.updatedAt = now.toISOString();
+      memoryHouseholds.set(householdId, hh);
+    }
+
+    // Proactively send in-app notification if target user is registered
+    const targetUser = await UserRepository.findByEmail(normalizedEmail);
+    if (targetUser) {
+      await this.createNotification(
+        targetUser._id ? targetUser._id.toString() : targetUser.id,
+        'household_invite',
+        `Invitation to join "${hh.name}"`,
+        `${inviterName} invited you to join their shared household budget as a ${input.role}.`,
+        {
+          dedupKey: `invite:${id}`,
+          householdId,
+          invitationId: id,
+          token
+        }
+      );
+    }
+
+    return {
+      invitation,
+      inviteLink: `/invite?token=${token}`
+    };
+  }
+
+  static async acceptHouseholdInvitation(
+    token: string,
+    userId: string,
+    userEmail: string,
+    userName: string
+  ): Promise<Household> {
+    let targetHh: Household | null = null;
+    let targetInv: HouseholdInvitation | null = null;
+
+    if (this.isDbConnected()) {
+      const doc = await HouseholdModel.findOne({ 'invitations.token': token }).exec();
+      if (!doc) {
+        throw AppError.notFound('Invalid or non-existent invitation token.');
+      }
+      targetHh = doc.toHousehold();
+      const found = targetHh.invitations?.find((i) => i.token === token);
+      if (found) targetInv = found;
+    } else {
+      for (const h of memoryHouseholds.values()) {
+        const found = h.invitations?.find((i) => i.token === token);
+        if (found) {
+          targetHh = h;
+          targetInv = found;
+          break;
+        }
+      }
+    }
+
+    if (!targetHh || !targetInv) {
+      throw AppError.notFound('Invalid or non-existent invitation token.');
+    }
+
+    if (targetInv.status === 'revoked') {
+      throw AppError.forbidden('This invitation has been revoked by the household owner.');
+    }
+    if (targetInv.status === 'accepted') {
+      throw AppError.badRequest('This invitation has already been accepted.');
+    }
+    if (new Date(targetInv.expiresAt) < new Date() || targetInv.status === 'expired') {
+      throw AppError.badRequest('This invitation has expired.');
+    }
+
+    const normalizedUserEmail = userEmail.toLowerCase().trim();
+    if (targetInv.inviteeEmail.toLowerCase() !== normalizedUserEmail) {
+      throw AppError.forbidden(`This invitation was issued for ${targetInv.inviteeEmail}, not ${userEmail}.`);
+    }
+
+    if (targetHh.members.some((m) => m.userId === userId)) {
+      throw AppError.conflict('You are already a member of this household.');
+    }
+
+    const newMember: HouseholdMember = {
+      userId,
+      email: normalizedUserEmail,
+      displayName: userName,
+      role: targetInv.role,
+      joinedAt: new Date().toISOString()
+    };
+
+    const auditEntry: HouseholdAuditLog = {
+      id: new mongoose.Types.ObjectId().toString(),
+      action: 'invitation_accepted',
+      actorUserId: userId,
+      actorName: userName,
+      targetUserId: userId,
+      targetEmail: normalizedUserEmail,
+      role: targetInv.role,
+      details: `${userName} accepted invitation and joined as ${targetInv.role}`,
+      timestamp: new Date().toISOString()
+    };
+
+    if (this.isDbConnected()) {
+      const doc = await HouseholdModel.findById(targetHh.id).exec();
+      if (doc) {
         doc.members.push({
           ...newMember,
           joinedAt: new Date(newMember.joinedAt)
+        });
+        const invSub = doc.invitations.find((i) => i.token === token);
+        if (invSub) invSub.status = 'accepted';
+        doc.auditLogs.push({
+          ...auditEntry,
+          timestamp: new Date(auditEntry.timestamp)
         });
         await doc.save();
         return doc.toHousehold();
       }
     }
 
-    hh.members.push(newMember);
+    targetHh.members.push(newMember);
+    targetInv.status = 'accepted';
+    targetHh.auditLogs = [...(targetHh.auditLogs || []), auditEntry];
+    targetHh.updatedAt = new Date().toISOString();
+    memoryHouseholds.set(targetHh.id, targetHh);
+    return targetHh;
+  }
+
+  static async revokeHouseholdInvitation(
+    householdId: string,
+    ownerId: string,
+    invitationId: string
+  ): Promise<Household> {
+    const hh = await this.validateHouseholdAccess(householdId, ownerId, 'owner');
+    const ownerMember = hh.members.find((m) => m.userId === ownerId);
+
+    if (this.isDbConnected()) {
+      const doc = await HouseholdModel.findById(householdId).exec();
+      if (!doc) throw AppError.notFound('Household not found.');
+      const inv = doc.invitations.find((i) => i.id === invitationId);
+      if (!inv) throw AppError.notFound('Invitation not found.');
+      inv.status = 'revoked';
+      doc.auditLogs.push({
+        id: new mongoose.Types.ObjectId().toString(),
+        action: 'invitation_revoked',
+        actorUserId: ownerId,
+        actorName: ownerMember?.displayName || 'Owner',
+        targetEmail: inv.inviteeEmail,
+        details: `Revoked invitation for ${inv.inviteeEmail}`,
+        timestamp: new Date()
+      });
+      await doc.save();
+      return doc.toHousehold();
+    }
+
+    const inv = hh.invitations?.find((i) => i.id === invitationId);
+    if (!inv) throw AppError.notFound('Invitation not found.');
+    inv.status = 'revoked';
+    hh.auditLogs = [
+      ...(hh.auditLogs || []),
+      {
+        id: new mongoose.Types.ObjectId().toString(),
+        action: 'invitation_revoked',
+        actorUserId: ownerId,
+        actorName: ownerMember?.displayName || 'Owner',
+        targetEmail: inv.inviteeEmail,
+        details: `Revoked invitation for ${inv.inviteeEmail}`,
+        timestamp: new Date().toISOString()
+      }
+    ];
     hh.updatedAt = new Date().toISOString();
     memoryHouseholds.set(householdId, hh);
     return hh;
+  }
+
+  static async removeHouseholdMember(
+    householdId: string,
+    ownerId: string,
+    targetUserId: string
+  ): Promise<Household> {
+    const hh = await this.validateHouseholdAccess(householdId, ownerId, 'owner');
+    if (targetUserId === ownerId) {
+      throw AppError.badRequest('Cannot remove the household owner. Delete the household instead.');
+    }
+
+    const ownerMember = hh.members.find((m) => m.userId === ownerId);
+    const targetMember = hh.members.find((m) => m.userId === targetUserId);
+    if (!targetMember) throw AppError.notFound('Member not found in this household.');
+
+    const auditEntry: HouseholdAuditLog = {
+      id: new mongoose.Types.ObjectId().toString(),
+      action: 'member_removed',
+      actorUserId: ownerId,
+      actorName: ownerMember?.displayName || 'Owner',
+      targetUserId,
+      targetEmail: targetMember.email,
+      details: `Removed ${targetMember.displayName} from household`,
+      timestamp: new Date().toISOString()
+    };
+
+    if (this.isDbConnected()) {
+      const doc = await HouseholdModel.findById(householdId).exec();
+      if (!doc) throw AppError.notFound('Household not found.');
+      doc.members = doc.members.filter((m) => m.userId !== targetUserId);
+      doc.auditLogs.push({
+        ...auditEntry,
+        timestamp: new Date(auditEntry.timestamp)
+      });
+      await doc.save();
+      return doc.toHousehold();
+    }
+
+    hh.members = hh.members.filter((m) => m.userId !== targetUserId);
+    hh.auditLogs = [...(hh.auditLogs || []), auditEntry];
+    hh.updatedAt = new Date().toISOString();
+    memoryHouseholds.set(householdId, hh);
+    return hh;
+  }
+
+  static async updateHouseholdMemberRole(
+    householdId: string,
+    ownerId: string,
+    targetUserId: string,
+    newRole: 'editor' | 'viewer'
+  ): Promise<Household> {
+    const hh = await this.validateHouseholdAccess(householdId, ownerId, 'owner');
+    if (targetUserId === ownerId) {
+      throw AppError.badRequest('Cannot modify the role of the household owner.');
+    }
+
+    const ownerMember = hh.members.find((m) => m.userId === ownerId);
+    const targetMember = hh.members.find((m) => m.userId === targetUserId);
+    if (!targetMember) throw AppError.notFound('Member not found in this household.');
+
+    const auditEntry: HouseholdAuditLog = {
+      id: new mongoose.Types.ObjectId().toString(),
+      action: 'role_updated',
+      actorUserId: ownerId,
+      actorName: ownerMember?.displayName || 'Owner',
+      targetUserId,
+      targetEmail: targetMember.email,
+      role: newRole,
+      details: `Updated role of ${targetMember.displayName} to ${newRole}`,
+      timestamp: new Date().toISOString()
+    };
+
+    if (this.isDbConnected()) {
+      const doc = await HouseholdModel.findById(householdId).exec();
+      if (!doc) throw AppError.notFound('Household not found.');
+      const mem = doc.members.find((m) => m.userId === targetUserId);
+      if (mem) mem.role = newRole;
+      doc.auditLogs.push({
+        ...auditEntry,
+        timestamp: new Date(auditEntry.timestamp)
+      });
+      await doc.save();
+      return doc.toHousehold();
+    }
+
+    targetMember.role = newRole;
+    hh.auditLogs = [...(hh.auditLogs || []), auditEntry];
+    hh.updatedAt = new Date().toISOString();
+    memoryHouseholds.set(householdId, hh);
+    return hh;
+  }
+
+  static async deleteHousehold(householdId: string, ownerId: string): Promise<boolean> {
+    await this.validateHouseholdAccess(householdId, ownerId, 'owner');
+
+    if (this.isDbConnected()) {
+      const res = await HouseholdModel.deleteOne({ _id: householdId, ownerId }).exec();
+      return (res.deletedCount || 0) > 0;
+    }
+
+    return memoryHouseholds.delete(householdId);
   }
 
   // ==========================================
@@ -1529,6 +2172,312 @@ export class FinancialRepository {
       }
     }
     return count;
+  }
+
+  static async deleteNotification(id: string, userId: string): Promise<boolean> {
+    if (this.isDbConnected()) {
+      const res = await NotificationModel.deleteOne({ _id: id, userId }).exec();
+      return (res.deletedCount || 0) > 0;
+    }
+
+    const n = memoryNotifications.get(id);
+    if (!n || n.userId !== userId) return false;
+    return memoryNotifications.delete(id);
+  }
+
+  static async hasNotificationWithDedupKey(userId: string, dedupKey: string): Promise<boolean> {
+    if (this.isDbConnected()) {
+      const existing = await NotificationModel.findOne({
+        userId,
+        'metadata.dedupKey': dedupKey
+      }).exec();
+      return !!existing;
+    }
+
+    for (const n of memoryNotifications.values()) {
+      if (n.userId === userId && n.metadata?.dedupKey === dedupKey) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  static async createNotification(
+    userId: string,
+    type: NotificationType,
+    title: string,
+    message: string,
+    metadata?: Record<string, any>
+  ): Promise<Notification> {
+    const dedupKey = metadata?.dedupKey as string | undefined;
+
+    // Idempotency: if dedupKey provided, check if a notification already exists with this key
+    if (dedupKey) {
+      if (this.isDbConnected()) {
+        const existing = await NotificationModel.findOne({
+          userId,
+          'metadata.dedupKey': dedupKey
+        }).exec();
+        if (existing) {
+          return existing.toNotification();
+        }
+      } else {
+        for (const n of memoryNotifications.values()) {
+          if (n.userId === userId && n.metadata?.dedupKey === dedupKey) {
+            return n;
+          }
+        }
+      }
+    }
+
+    if (this.isDbConnected()) {
+      const doc = await NotificationModel.create({
+        userId,
+        type,
+        title,
+        message,
+        isRead: false,
+        metadata
+      });
+      return doc.toNotification();
+    }
+
+    const id = new mongoose.Types.ObjectId().toString();
+    const notif: Notification = {
+      id,
+      userId,
+      type,
+      title,
+      message,
+      isRead: false,
+      metadata,
+      createdAt: new Date().toISOString()
+    };
+    memoryNotifications.set(id, notif);
+    return notif;
+  }
+
+  static async runPeriodicChecks(
+    userId: string
+  ): Promise<{ createdCount: number; notifications: Notification[] }> {
+    const created: Notification[] = [];
+    const user = await UserRepository.findById(userId);
+    const prefs = user?.preferences || {};
+
+    if (prefs.inAppNotifications === false) {
+      return { createdCount: 0, notifications: [] };
+    }
+
+    // 1. Check budget alerts if enabled
+    if (prefs.budgetAlertsEnabled !== false) {
+      const now = new Date();
+      const budgets = await this.listBudgets(userId, now.getUTCMonth() + 1, now.getUTCFullYear());
+      const categories = await this.listCategories(userId);
+      const catMap = new Map(categories.map((c) => [c.id, c.name]));
+      for (const b of budgets) {
+        const pct = b.consumedPercent || 0;
+        const thresholds = [100, 90, 75];
+        for (const t of thresholds) {
+          if (pct >= t) {
+            const dedupKey = `budget-alert:${b.id}-${t}-${b.periodMonth}-${b.periodYear}`;
+            if (await this.hasNotificationWithDedupKey(userId, dedupKey)) {
+              break;
+            }
+
+            const catName = b.categoryId
+              ? catMap.get(b.categoryId) || 'Category'
+              : 'Overall Monthly';
+            const title = t >= 100 ? `Budget Exceeded: ${catName}` : `Budget Warning: ${catName} at ${pct}%`;
+            const msg =
+              t >= 100
+                ? `You have consumed ${pct}% of your ${catName} budget for ${b.periodMonth}/${b.periodYear}. Please review expenses.`
+                : `You have reached ${pct}% of your ${catName} spending limit (${t}% threshold reached).`;
+
+            const notif = await this.createNotification(userId, 'budget_alert', title, msg, {
+              dedupKey,
+              budgetId: b.id,
+              threshold: t,
+              periodMonth: b.periodMonth,
+              periodYear: b.periodYear
+            });
+            created.push(notif);
+            break;
+          }
+        }
+      }
+    }
+
+    // 2. Check recurring schedules if enabled
+    if (prefs.recurringRemindersEnabled !== false) {
+      const recurringList = await this.listRecurring(userId);
+      const now = new Date();
+      const threeDaysLater = new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000);
+
+      for (const rec of recurringList) {
+        if (!rec.isActive) continue;
+        const nextRun = new Date(rec.nextRunDateUtc);
+        if (nextRun <= threeDaysLater) {
+          const dateStr = rec.nextRunDateUtc.slice(0, 10);
+          const dedupKey = `recurring-reminder:${rec.id}-${dateStr}`;
+          if (await this.hasNotificationWithDedupKey(userId, dedupKey)) {
+            continue;
+          }
+
+          const isOverdue = nextRun < now;
+          const title = isOverdue
+            ? `Recurring Bill Overdue: ${rec.description}`
+            : `Upcoming Bill: ${rec.description}`;
+          const msg = `Scheduled ${rec.type} of ${formatCurrency(fromMinorUnits(rec.amountMinorUnits, rec.currency), rec.currency)} is due on ${dateStr}.`;
+
+          const notif = await this.createNotification(userId, 'recurring_due', title, msg, {
+            dedupKey,
+            recurringId: rec.id,
+            dueDate: dateStr
+          });
+          created.push(notif);
+        }
+      }
+    }
+
+    // 3. Check savings goals if enabled
+    if (prefs.goalMilestonesEnabled !== false) {
+      const goals = await this.listGoals(userId);
+      for (const g of goals) {
+        const progress = g.progressPercent || 0;
+        if (progress >= 100) {
+          const dedupKey = `goal-milestone:${g.id}-100`;
+          if (!(await this.hasNotificationWithDedupKey(userId, dedupKey))) {
+            const notif = await this.createNotification(
+              userId,
+              'goal_milestone',
+              `Goal Reached: ${g.name}! 🎉`,
+              `Congratulations! You have reached 100% of your target amount for ${g.name}.`,
+              { dedupKey, goalId: g.id, milestone: 100 }
+            );
+            created.push(notif);
+          }
+        } else if (progress >= 50) {
+          const dedupKey = `goal-milestone:${g.id}-50`;
+          if (!(await this.hasNotificationWithDedupKey(userId, dedupKey))) {
+            const notif = await this.createNotification(
+              userId,
+              'goal_milestone',
+              `Halfway Milestone: ${g.name}`,
+              `You have achieved 50% progress towards your savings goal "${g.name}". Keep it up!`,
+              { dedupKey, goalId: g.id, milestone: 50 }
+            );
+            created.push(notif);
+          }
+        }
+      }
+    }
+
+    return { createdCount: created.length, notifications: created };
+  }
+
+  // ==========================================
+  // User Data Export & Account Deletion Cascade
+  // ==========================================
+  static async exportUserData(userId: string): Promise<UserDataExport> {
+    const userDoc = await UserRepository.findById(userId);
+    const userProfile = userDoc ? (typeof userDoc.toProfile === 'function' ? userDoc.toProfile() : userDoc) : null;
+
+    let userBudgets: Budget[] = [];
+    if (this.isDbConnected()) {
+      const docs = await BudgetModel.find({ userId }).exec();
+      userBudgets = docs.map((d) => d.toBudget(0));
+    } else {
+      for (const b of memoryBudgets.values()) {
+        if (b.userId === userId) userBudgets.push(b);
+      }
+    }
+
+    const [accounts, txResult, goals, recurringSchedules, notifications, households] = await Promise.all([
+      this.listAccounts(userId),
+      this.listTransactions(userId, { limit: 10000 }),
+      this.listGoals(userId),
+      this.listRecurring(userId),
+      this.listNotifications(userId),
+      this.listHouseholdsForUser(userId)
+    ]);
+
+    return {
+      exportedAt: new Date().toISOString(),
+      formatVersion: '1.0',
+      user: userProfile,
+      accounts,
+      transactions: txResult.transactions,
+      budgets: userBudgets,
+      goals,
+      recurringSchedules,
+      notifications,
+      households
+    };
+  }
+
+  static async deleteUserDataCascade(userId: string): Promise<{ deleted: boolean; message: string }> {
+    // 1. Check if user is owner of any shared household with active other members
+    const households = await this.listHouseholdsForUser(userId);
+    for (const hh of households) {
+      if (hh.ownerId === userId && hh.members.length > 1) {
+        throw AppError.badRequest(
+          `You are the owner of the shared space "${hh.name}" with active members. Please transfer ownership or delete the shared space before deleting your account.`
+        );
+      }
+    }
+
+    // 2. Cascade delete personal records from DB or memory
+    if (this.isDbConnected()) {
+      await Promise.all([
+        Account.deleteMany({ userId }).exec(),
+        TransactionModel.deleteMany({ userId }).exec(),
+        BudgetModel.deleteMany({ userId }).exec(),
+        Goal.deleteMany({ userId }).exec(),
+        Recurring.deleteMany({ userId }).exec(),
+        NotificationModel.deleteMany({ userId }).exec(),
+        AiConversationModel.deleteMany({ userId }).exec(),
+        HouseholdModel.deleteMany({ ownerId: userId }).exec(),
+        HouseholdModel.updateMany({ 'members.userId': userId }, { $pull: { members: { userId } } }).exec()
+      ]);
+    } else {
+      // In-memory cleanup
+      for (const [id, acc] of memoryAccounts.entries()) {
+        if (acc.userId === userId) memoryAccounts.delete(id);
+      }
+      for (const [id, tx] of memoryTransactions.entries()) {
+        if (tx.userId === userId) memoryTransactions.delete(id);
+      }
+      for (const [id, b] of memoryBudgets.entries()) {
+        if (b.userId === userId) memoryBudgets.delete(id);
+      }
+      for (const [id, g] of memoryGoals.entries()) {
+        if (g.userId === userId) memoryGoals.delete(id);
+      }
+      for (const [id, r] of memoryRecurring.entries()) {
+        if (r.userId === userId) memoryRecurring.delete(id);
+      }
+      for (const [id, n] of memoryNotifications.entries()) {
+        if (n.userId === userId) memoryNotifications.delete(id);
+      }
+      for (const [id, c] of memoryAi.entries()) {
+        if (c.userId === userId) memoryAi.delete(id);
+      }
+      for (const [id, hh] of memoryHouseholds.entries()) {
+        if (hh.ownerId === userId) {
+          memoryHouseholds.delete(id);
+        } else {
+          hh.members = hh.members.filter((m) => m.userId !== userId);
+        }
+      }
+    }
+
+    // 3. Delete user account record
+    await UserRepository.deleteUser(userId);
+
+    return {
+      deleted: true,
+      message: 'Account and associated personal records permanently deleted.'
+    };
   }
 
   // ==========================================
@@ -1614,6 +2563,443 @@ export class FinancialRepository {
     conv.updatedAt = now;
     memoryAi.set(conversationId, conv);
     return conv;
+  }
+
+  static async getAiConversationById(id: string, userId: string): Promise<AiConversation | null> {
+    if (this.isDbConnected()) {
+      const doc = await AiConversationModel.findOne({ _id: id, userId, isArchived: false }).exec();
+      return doc ? doc.toAiConversation() : null;
+    }
+    const conv = memoryAi.get(id);
+    if (!conv || conv.userId !== userId || conv.isArchived) return null;
+    return conv;
+  }
+
+  static async deleteAiConversation(id: string, userId: string): Promise<boolean> {
+    if (this.isDbConnected()) {
+      const res = await AiConversationModel.updateOne({ _id: id, userId }, { isArchived: true }).exec();
+      return (res.modifiedCount || 0) > 0;
+    }
+    const conv = memoryAi.get(id);
+    if (!conv || conv.userId !== userId) return false;
+    conv.isArchived = true;
+    memoryAi.set(id, conv);
+    return true;
+  }
+
+  static async getAiInsightSummary(
+    userId: string,
+    month?: number,
+    year?: number
+  ): Promise<AiInsightSummary> {
+    const now = new Date();
+    const targetMonth = month || now.getUTCMonth() + 1;
+    const targetYear = year || now.getUTCFullYear();
+
+    const startOfMonth = new Date(Date.UTC(targetYear, targetMonth - 1, 1)).toISOString();
+    const endOfMonth = new Date(Date.UTC(targetYear, targetMonth, 0, 23, 59, 59, 999)).toISOString();
+
+    const [summary, breakdown, budgetVsActual] = await Promise.all([
+      this.getAnalyticsSummary(userId, { startDateUtc: startOfMonth, endDateUtc: endOfMonth }),
+      this.getCategoryBreakdown(userId, { month: targetMonth, year: targetYear }),
+      this.getBudgetVsActual(userId, targetMonth, targetYear)
+    ]);
+
+    const overBudgetCategories = budgetVsActual
+      .filter((b) => b.isOverBudget || b.consumedPercent >= 100)
+      .map((b) => ({
+        categoryName: b.categoryName,
+        spentMinorUnits: b.spentAmountMinorUnits,
+        limitMinorUnits: b.limitAmountMinorUnits,
+        percent: b.consumedPercent
+      }));
+
+    const topExpenseCategories = breakdown
+      .slice(0, 5)
+      .map((c) => ({
+        categoryName: c.categoryName,
+        amountMinorUnits: c.amountMinorUnits,
+        percentage: c.percentage
+      }));
+
+    const largestExpenses = (summary.largestExpenses || []).map((e) => ({
+      description: e.description,
+      amountMinorUnits: e.amountMinorUnits,
+      dateUtc: e.dateUtc,
+      categoryName: e.categoryName
+    }));
+
+    const ruleBasedSuggestions: string[] = [];
+
+    if (overBudgetCategories.length > 0 && overBudgetCategories[0]) {
+      ruleBasedSuggestions.push(
+        `You have ${overBudgetCategories.length} categories over budget (including ${overBudgetCategories[0].categoryName}). Pause non-essential purchases in these envelopes.`
+      );
+    }
+
+    const topCat = topExpenseCategories[0];
+    if (topCat && topCat.percentage > 35) {
+      ruleBasedSuggestions.push(
+        `${topCat.categoryName} represents ${topCat.percentage}% of total outflows. Consider reviewing routine purchases in this category.`
+      );
+    }
+
+    if (summary.savingsRatePct < 20 && summary.monthlyIncomeMinorUnits > 0) {
+      ruleBasedSuggestions.push(
+        `Your current savings rate is ${summary.savingsRatePct}%. Aim for the 50/30/20 guideline by reserving at least 20% toward liquid emergency funds.`
+      );
+    } else if (summary.savingsRatePct >= 20) {
+      ruleBasedSuggestions.push(
+        `Strong savings pace! You preserved ${summary.savingsRatePct}% of verified income. Consider allocating surplus to active savings goals.`
+      );
+    }
+
+    return {
+      periodMonth: targetMonth,
+      periodYear: targetYear,
+      totalIncomeMinorUnits: summary.monthlyIncomeMinorUnits,
+      totalExpenseMinorUnits: summary.monthlyExpenseMinorUnits,
+      netSavingsMinorUnits: summary.netSavingsMinorUnits,
+      savingsRatePct: summary.savingsRatePct,
+      overBudgetCategories,
+      topExpenseCategories,
+      largestExpenses,
+      spendingComparisonVsPrevMonth: summary.previousPeriod
+        ? {
+            expenseDeltaPct: summary.previousPeriod.expenseDeltaPct,
+            incomeDeltaPct:
+              summary.previousPeriod.incomeMinorUnits > 0
+                ? Math.round(
+                    ((summary.monthlyIncomeMinorUnits - summary.previousPeriod.incomeMinorUnits) /
+                      summary.previousPeriod.incomeMinorUnits) *
+                      100
+                  )
+                : 0
+          }
+        : undefined,
+      ruleBasedSuggestions
+    };
+  }
+
+  // ==========================================
+  // Financial Analytics & Insights
+  // ==========================================
+  static async getAnalyticsSummary(
+    userId: string,
+    query: {
+      startDateUtc?: string;
+      endDateUtc?: string;
+      accountId?: string;
+      categoryId?: string;
+    } = {}
+  ): Promise<AnalyticsSummaryData> {
+    const allAccounts = await this.listAccounts(userId);
+    const targetAccounts = query.accountId
+      ? allAccounts.filter((a) => a.id === query.accountId)
+      : allAccounts;
+
+    const totalBalanceMinorUnits = targetAccounts.reduce(
+      (acc, a) => acc + a.balanceMinorUnits,
+      0
+    );
+
+    // Current period bounds
+    let startDate: Date;
+    let endDate: Date;
+
+    if (query.startDateUtc && query.endDateUtc) {
+      startDate = new Date(query.startDateUtc);
+      endDate = new Date(query.endDateUtc);
+    } else {
+      const now = new Date();
+      startDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+      endDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0, 23, 59, 59, 999));
+    }
+
+    const { transactions: currentTxns } = await this.listTransactions(userId, {
+      startDateUtc: startDate.toISOString(),
+      endDateUtc: endDate.toISOString(),
+      sourceAccountId: query.accountId,
+      categoryId: query.categoryId,
+      limit: 2000
+    });
+
+    const eligibleCurrent = currentTxns.filter((t) => t.status !== 'cancelled');
+
+    let monthlyIncomeMinorUnits = 0;
+    let monthlyExpenseMinorUnits = 0;
+
+    for (const t of eligibleCurrent) {
+      if (t.type === 'income') monthlyIncomeMinorUnits += t.amountMinorUnits;
+      if (t.type === 'expense') monthlyExpenseMinorUnits += t.amountMinorUnits;
+    }
+
+    const netSavingsMinorUnits = monthlyIncomeMinorUnits - monthlyExpenseMinorUnits;
+    const savingsRatePct =
+      monthlyIncomeMinorUnits > 0
+        ? Math.round(Math.max(0, (netSavingsMinorUnits / monthlyIncomeMinorUnits) * 100))
+        : 0;
+
+    // Previous period comparison
+    const periodDurationMs = Math.max(1, endDate.getTime() - startDate.getTime());
+    const prevEndDate = new Date(startDate.getTime() - 1);
+    const prevStartDate = new Date(prevEndDate.getTime() - periodDurationMs);
+
+    const { transactions: prevTxns } = await this.listTransactions(userId, {
+      startDateUtc: prevStartDate.toISOString(),
+      endDateUtc: prevEndDate.toISOString(),
+      sourceAccountId: query.accountId,
+      categoryId: query.categoryId,
+      limit: 2000
+    });
+
+    const eligiblePrev = prevTxns.filter((t) => t.status !== 'cancelled');
+    let prevIncome = 0;
+    let prevExpense = 0;
+
+    for (const t of eligiblePrev) {
+      if (t.type === 'income') prevIncome += t.amountMinorUnits;
+      if (t.type === 'expense') prevExpense += t.amountMinorUnits;
+    }
+
+    const prevNet = prevIncome - prevExpense;
+    const expenseDeltaMinorUnits = monthlyExpenseMinorUnits - prevExpense;
+    const expenseDeltaPct =
+      prevExpense > 0
+        ? Math.round(((monthlyExpenseMinorUnits - prevExpense) / prevExpense) * 100)
+        : 0;
+
+    const previousPeriod: AnalyticsPreviousPeriodComparison = {
+      incomeMinorUnits: prevIncome,
+      expenseMinorUnits: prevExpense,
+      netSavingsMinorUnits: prevNet,
+      expenseDeltaPct,
+      expenseDeltaMinorUnits
+    };
+
+    // Category mapping for readable names
+    const categories = await this.listCategories(userId);
+    const catMap = new Map(categories.map((c) => [c.id, c]));
+
+    // Largest expenses (Top 5)
+    const largestExpenses: LargestExpenseItem[] = eligibleCurrent
+      .filter((t) => t.type === 'expense')
+      .sort((a, b) => b.amountMinorUnits - a.amountMinorUnits)
+      .slice(0, 5)
+      .map((t) => ({
+        id: t.id,
+        description: t.description,
+        merchantName: t.merchantName,
+        categoryName: t.categoryId ? (catMap.get(t.categoryId)?.name || 'Category') : 'Uncategorized',
+        dateUtc: t.dateUtc,
+        amountMinorUnits: t.amountMinorUnits,
+        currency: t.currency
+      }));
+
+    // Frequently used categories (Top 5)
+    const categoryStats = new Map<string, { count: number; total: number }>();
+    for (const t of eligibleCurrent) {
+      if (t.type === 'expense') {
+        const catId = t.categoryId || 'uncategorized';
+        const existing = categoryStats.get(catId) || { count: 0, total: 0 };
+        categoryStats.set(catId, {
+          count: existing.count + 1,
+          total: existing.total + t.amountMinorUnits
+        });
+      }
+    }
+
+    const frequentlyUsedCategories: FrequentCategoryItem[] = Array.from(categoryStats.entries())
+      .sort((a, b) => b[1].count - a[1].count)
+      .slice(0, 5)
+      .map(([catId, stat]) => {
+        const cat = catMap.get(catId);
+        return {
+          categoryId: catId,
+          categoryName: cat ? cat.name : 'Uncategorized',
+          color: cat ? cat.color : '#94A3B8',
+          count: stat.count,
+          totalAmountMinorUnits: stat.total
+        };
+      });
+
+    return {
+      totalBalanceMinorUnits,
+      monthlyIncomeMinorUnits,
+      monthlyExpenseMinorUnits,
+      netSavingsMinorUnits,
+      savingsRatePct,
+      previousPeriod,
+      largestExpenses,
+      frequentlyUsedCategories,
+      accountCount: targetAccounts.length,
+      transactionCount: eligibleCurrent.length
+    };
+  }
+
+  static async getAnalyticsTrends(
+    userId: string,
+    query: {
+      interval?: 'daily' | 'weekly' | 'monthly';
+      startDateUtc?: string;
+      endDateUtc?: string;
+      accountId?: string;
+      categoryId?: string;
+    } = {}
+  ): Promise<AnalyticsTrendPoint[]> {
+    const interval = query.interval || 'daily';
+    const now = new Date();
+
+    let startDate: Date;
+    let endDate: Date;
+
+    if (query.startDateUtc && query.endDateUtc) {
+      startDate = new Date(query.startDateUtc);
+      endDate = new Date(query.endDateUtc);
+    } else if (interval === 'monthly') {
+      startDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 5, 1));
+      endDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0, 23, 59, 59, 999));
+    } else {
+      startDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+      endDate = now;
+    }
+
+    const { transactions } = await this.listTransactions(userId, {
+      startDateUtc: startDate.toISOString(),
+      endDateUtc: endDate.toISOString(),
+      sourceAccountId: query.accountId,
+      categoryId: query.categoryId,
+      limit: 2000
+    });
+
+    const eligible = transactions.filter((t) => t.status !== 'cancelled');
+    const pointMap = new Map<string, { income: number; expense: number }>();
+
+    for (const t of eligible) {
+      const tDate = new Date(t.dateUtc);
+      let dateKey: string;
+
+      if (interval === 'monthly') {
+        dateKey = t.dateUtc.slice(0, 7); // YYYY-MM
+      } else if (interval === 'weekly') {
+        // Find Monday of the week
+        const day = tDate.getUTCDay();
+        const diff = tDate.getUTCDate() - day + (day === 0 ? -6 : 1);
+        const monday = new Date(tDate);
+        monday.setUTCDate(diff);
+        dateKey = monday.toISOString().slice(0, 10);
+      } else {
+        dateKey = t.dateUtc.slice(0, 10); // YYYY-MM-DD
+      }
+
+      const existing = pointMap.get(dateKey) || { income: 0, expense: 0 };
+      if (t.type === 'income') existing.income += t.amountMinorUnits;
+      if (t.type === 'expense') existing.expense += t.amountMinorUnits;
+      pointMap.set(dateKey, existing);
+    }
+
+    return Array.from(pointMap.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([dateKey, val]) => ({
+        dateKey,
+        incomeMinorUnits: val.income,
+        expenseMinorUnits: val.expense,
+        netMinorUnits: val.income - val.expense
+      }));
+  }
+
+  static async getCategoryBreakdown(
+    userId: string,
+    query: {
+      month?: number;
+      year?: number;
+      startDateUtc?: string;
+      endDateUtc?: string;
+      accountId?: string;
+    } = {}
+  ): Promise<CategoryBreakdownItem[]> {
+    let startDate: Date;
+    let endDate: Date;
+
+    if (query.startDateUtc && query.endDateUtc) {
+      startDate = new Date(query.startDateUtc);
+      endDate = new Date(query.endDateUtc);
+    } else {
+      const now = new Date();
+      const month = query.month || now.getUTCMonth() + 1;
+      const year = query.year || now.getUTCFullYear();
+      startDate = new Date(Date.UTC(year, month - 1, 1));
+      endDate = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999));
+    }
+
+    const [categories, { transactions }] = await Promise.all([
+      this.listCategories(userId),
+      this.listTransactions(userId, {
+        type: 'expense',
+        startDateUtc: startDate.toISOString(),
+        endDateUtc: endDate.toISOString(),
+        sourceAccountId: query.accountId,
+        limit: 2000
+      })
+    ]);
+
+    const catMap = new Map(categories.map((c) => [c.id, c]));
+    const totals = new Map<string, { amount: number; count: number }>();
+    let grandTotalExpense = 0;
+
+    for (const t of transactions) {
+      if (t.status === 'cancelled') continue;
+      const catId = t.categoryId || 'uncategorized';
+      const current = totals.get(catId) || { amount: 0, count: 0 };
+      totals.set(catId, {
+        amount: current.amount + t.amountMinorUnits,
+        count: current.count + 1
+      });
+      grandTotalExpense += t.amountMinorUnits;
+    }
+
+    return Array.from(totals.entries())
+      .sort((a, b) => b[1].amount - a[1].amount)
+      .map(([catId, stat]) => {
+        const cat = catMap.get(catId);
+        const percentage =
+          grandTotalExpense > 0
+            ? Number(((stat.amount / grandTotalExpense) * 100).toFixed(1))
+            : 0;
+
+        return {
+          categoryId: catId,
+          categoryName: cat ? cat.name : 'Uncategorized',
+          color: cat ? cat.color : '#94A3B8',
+          amountMinorUnits: stat.amount,
+          percentage,
+          transactionCount: stat.count
+        };
+      });
+  }
+
+  static async getBudgetVsActual(
+    userId: string,
+    periodMonth: number,
+    periodYear: number
+  ): Promise<BudgetVsActualItem[]> {
+    const budgets = await this.listBudgets(userId, periodMonth, periodYear);
+    const categories = await this.listCategories(userId);
+    const catMap = new Map(categories.map((c) => [c.id, c.name]));
+
+    return budgets.map((b) => {
+      const catName = b.categoryId ? (catMap.get(b.categoryId) || 'Category') : 'Overall Monthly Limit';
+      return {
+        budgetId: b.id,
+        categoryId: b.categoryId,
+        categoryName: catName,
+        limitAmountMinorUnits: b.limitAmountMinorUnits,
+        spentAmountMinorUnits: b.spentAmountMinorUnits || 0,
+        remainingAmountMinorUnits: b.remainingAmountMinorUnits || 0,
+        consumedPercent: b.consumedPercent || 0,
+        isOverBudget: (b.spentAmountMinorUnits || 0) > b.limitAmountMinorUnits
+      };
+    });
   }
 
   // Clear memory stores for test isolation

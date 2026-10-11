@@ -1,0 +1,9 @@
+{
+  "appId": "com.lumaspend.app",
+  "appName": "LumaSpend",
+  "webDir": "dist",
+  "bundledWebRuntime": false,
+  "server": {
+    "androidScheme": "https"
+  }
+}

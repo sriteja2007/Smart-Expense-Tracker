@@ -34,6 +34,7 @@ interface TransactionTableProps {
   onDeleteTransaction: (tx: Transaction) => void;
   onOpenAddModal: () => void;
   onOpenImportModal: () => void;
+  onOpenScanModal?: () => void;
   onRefresh: () => void;
 }
 
@@ -55,7 +56,8 @@ export const TransactionTable: React.FC<TransactionTableProps> = ({
   onEditTransaction,
   onDeleteTransaction,
   onOpenAddModal,
-  onOpenImportModal
+  onOpenImportModal,
+  onOpenScanModal
 }) => {
   const { toast } = useToast();
   const [searchInput, setSearchInput] = useState('');
@@ -163,6 +165,18 @@ export const TransactionTable: React.FC<TransactionTableProps> = ({
             <Icons.Upload className="h-3.5 w-3.5 mr-1.5" />
             <span>Import CSV</span>
           </Button>
+
+          {onOpenScanModal && (
+            <Button
+              variant="glass"
+              size="sm"
+              onClick={onOpenScanModal}
+              className="text-xs text-text-secondary hover:text-white"
+            >
+              <Icons.Camera className="h-3.5 w-3.5 mr-1.5" />
+              <span>Scan Receipt</span>
+            </Button>
+          )}
 
           <Button
             variant="primary"

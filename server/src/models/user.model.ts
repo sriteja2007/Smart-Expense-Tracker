@@ -14,8 +14,13 @@ export interface IUser extends Document {
   preferences: {
     theme: 'dark' | 'light' | 'system';
     reducedMotion: boolean;
+    timezone?: string;
+    inAppNotifications?: boolean;
     budgetAlertsEnabled: boolean;
+    recurringRemindersEnabled?: boolean;
+    goalMilestonesEnabled?: boolean;
     weeklySummaryEmail: boolean;
+    browserPushEnabled?: boolean;
   };
   createdAt: Date;
   updatedAt: Date;
@@ -75,11 +80,31 @@ const UserSchema = new Schema<IUser>(
         type: Boolean,
         default: false
       },
+      timezone: {
+        type: String,
+        default: 'Asia/Kolkata'
+      },
+      inAppNotifications: {
+        type: Boolean,
+        default: true
+      },
       budgetAlertsEnabled: {
         type: Boolean,
         default: true
       },
+      recurringRemindersEnabled: {
+        type: Boolean,
+        default: true
+      },
+      goalMilestonesEnabled: {
+        type: Boolean,
+        default: true
+      },
       weeklySummaryEmail: {
+        type: Boolean,
+        default: false
+      },
+      browserPushEnabled: {
         type: Boolean,
         default: false
       }
@@ -109,10 +134,15 @@ UserSchema.methods.toProfile = function (): UserProfile {
     authProvider: this.authProvider as AuthProviderType,
     preferences: {
       defaultCurrency: this.defaultCurrency as CurrencyCode,
-      theme: this.preferences.theme,
-      reducedMotion: this.preferences.reducedMotion,
-      budgetAlertsEnabled: this.preferences.budgetAlertsEnabled,
-      weeklySummaryEmail: this.preferences.weeklySummaryEmail
+      theme: this.preferences?.theme || 'dark',
+      reducedMotion: this.preferences?.reducedMotion ?? false,
+      timezone: this.preferences?.timezone || 'Asia/Kolkata',
+      inAppNotifications: this.preferences?.inAppNotifications ?? true,
+      budgetAlertsEnabled: this.preferences?.budgetAlertsEnabled ?? true,
+      recurringRemindersEnabled: this.preferences?.recurringRemindersEnabled ?? true,
+      goalMilestonesEnabled: this.preferences?.goalMilestonesEnabled ?? true,
+      weeklySummaryEmail: this.preferences?.weeklySummaryEmail ?? false,
+      browserPushEnabled: this.preferences?.browserPushEnabled ?? false
     },
     createdAt: this.createdAt.toISOString(),
     updatedAt: this.updatedAt.toISOString()

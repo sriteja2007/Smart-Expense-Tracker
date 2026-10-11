@@ -16,8 +16,13 @@ interface InMemoryUser {
   preferences: {
     theme: 'dark' | 'light' | 'system';
     reducedMotion: boolean;
+    timezone?: string;
+    inAppNotifications?: boolean;
     budgetAlertsEnabled: boolean;
+    recurringRemindersEnabled?: boolean;
+    goalMilestonesEnabled?: boolean;
     weeklySummaryEmail: boolean;
+    browserPushEnabled?: boolean;
   };
   createdAt: string;
   updatedAt: string;
@@ -35,10 +40,15 @@ function toInMemoryProfile(user: InMemoryUser): UserProfile {
     authProvider: user.authProvider,
     preferences: {
       defaultCurrency: user.defaultCurrency,
-      theme: user.preferences.theme,
-      reducedMotion: user.preferences.reducedMotion,
-      budgetAlertsEnabled: user.preferences.budgetAlertsEnabled,
-      weeklySummaryEmail: user.preferences.weeklySummaryEmail
+      theme: user.preferences?.theme || 'dark',
+      reducedMotion: user.preferences?.reducedMotion ?? false,
+      timezone: user.preferences?.timezone || 'Asia/Kolkata',
+      inAppNotifications: user.preferences?.inAppNotifications ?? true,
+      budgetAlertsEnabled: user.preferences?.budgetAlertsEnabled ?? true,
+      recurringRemindersEnabled: user.preferences?.recurringRemindersEnabled ?? true,
+      goalMilestonesEnabled: user.preferences?.goalMilestonesEnabled ?? true,
+      weeklySummaryEmail: user.preferences?.weeklySummaryEmail ?? false,
+      browserPushEnabled: user.preferences?.browserPushEnabled ?? false
     },
     createdAt: user.createdAt,
     updatedAt: user.updatedAt
@@ -174,8 +184,13 @@ export class UserRepository {
       defaultCurrency?: CurrencyCode;
       theme?: 'dark' | 'light' | 'system';
       reducedMotion?: boolean;
+      timezone?: string;
+      inAppNotifications?: boolean;
       budgetAlertsEnabled?: boolean;
+      recurringRemindersEnabled?: boolean;
+      goalMilestonesEnabled?: boolean;
       weeklySummaryEmail?: boolean;
+      browserPushEnabled?: boolean;
       googleId?: string;
       authProvider?: AuthProviderType;
     }
@@ -188,8 +203,13 @@ export class UserRepository {
       if (updates.defaultCurrency) user.defaultCurrency = updates.defaultCurrency;
       if (updates.theme) user.preferences.theme = updates.theme;
       if (updates.reducedMotion !== undefined) user.preferences.reducedMotion = updates.reducedMotion;
+      if (updates.timezone) user.preferences.timezone = updates.timezone;
+      if (updates.inAppNotifications !== undefined) user.preferences.inAppNotifications = updates.inAppNotifications;
       if (updates.budgetAlertsEnabled !== undefined) user.preferences.budgetAlertsEnabled = updates.budgetAlertsEnabled;
+      if (updates.recurringRemindersEnabled !== undefined) user.preferences.recurringRemindersEnabled = updates.recurringRemindersEnabled;
+      if (updates.goalMilestonesEnabled !== undefined) user.preferences.goalMilestonesEnabled = updates.goalMilestonesEnabled;
       if (updates.weeklySummaryEmail !== undefined) user.preferences.weeklySummaryEmail = updates.weeklySummaryEmail;
+      if (updates.browserPushEnabled !== undefined) user.preferences.browserPushEnabled = updates.browserPushEnabled;
       if (updates.googleId) user.googleId = updates.googleId;
       if (updates.authProvider) user.authProvider = updates.authProvider;
 
@@ -204,8 +224,13 @@ export class UserRepository {
     if (updates.defaultCurrency) user.defaultCurrency = updates.defaultCurrency;
     if (updates.theme) user.preferences.theme = updates.theme;
     if (updates.reducedMotion !== undefined) user.preferences.reducedMotion = updates.reducedMotion;
+    if (updates.timezone) user.preferences.timezone = updates.timezone;
+    if (updates.inAppNotifications !== undefined) user.preferences.inAppNotifications = updates.inAppNotifications;
     if (updates.budgetAlertsEnabled !== undefined) user.preferences.budgetAlertsEnabled = updates.budgetAlertsEnabled;
+    if (updates.recurringRemindersEnabled !== undefined) user.preferences.recurringRemindersEnabled = updates.recurringRemindersEnabled;
+    if (updates.goalMilestonesEnabled !== undefined) user.preferences.goalMilestonesEnabled = updates.goalMilestonesEnabled;
     if (updates.weeklySummaryEmail !== undefined) user.preferences.weeklySummaryEmail = updates.weeklySummaryEmail;
+    if (updates.browserPushEnabled !== undefined) user.preferences.browserPushEnabled = updates.browserPushEnabled;
     if (updates.googleId) user.googleId = updates.googleId;
     if (updates.authProvider) user.authProvider = updates.authProvider;
     user.updatedAt = new Date().toISOString();
@@ -217,6 +242,15 @@ export class UserRepository {
       _id: user.id,
       toProfile: () => toInMemoryProfile(user)
     };
+  }
+
+  static async deleteUser(id: string): Promise<boolean> {
+    if (this.isDbConnected()) {
+      const res = await User.findByIdAndDelete(id).exec();
+      return !!res;
+    }
+
+    return inMemoryStore.delete(id);
   }
 
   static clearInMemory(): void {

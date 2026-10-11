@@ -13,6 +13,7 @@ import { reportsRouter } from './reports.routes.js';
 import { notificationRouter } from './notification.routes.js';
 import { householdRouter } from './household.routes.js';
 import { aiRouter } from './ai.routes.js';
+import { receiptsRouter } from './receipts.routes.js';
 
 export const apiRouter = Router();
 
@@ -30,3 +31,4 @@ apiRouter.use('/reports', reportsRouter);
 apiRouter.use('/notifications', notificationRouter);
 apiRouter.use('/households', householdRouter);
 apiRouter.use('/ai', aiRouter);
+apiRouter.use('/receipts', receiptsRouter);

@@ -28,6 +28,26 @@ budgetRouter.get(
   })
 );
 
+// POST /api/budgets/check-alerts - Evaluate thresholds and emit alerts without duplicates
+budgetRouter.post(
+  '/check-alerts',
+  asyncHandler(async (req, res) => {
+    const userId = req.user!.id;
+    const now = new Date();
+    const periodMonth = req.body?.month ? parseInt(req.body.month, 10) : now.getUTCMonth() + 1;
+    const periodYear = req.body?.year ? parseInt(req.body.year, 10) : now.getUTCFullYear();
+
+    const alerts = await FinancialRepository.checkAndTriggerBudgetAlerts(userId, periodMonth, periodYear);
+    res.status(HttpStatus.OK).json({
+      success: true,
+      data: {
+        triggeredCount: alerts.length,
+        alerts
+      }
+    });
+  })
+);
+
 // POST /api/budgets - Create a new budget
 budgetRouter.post(
   '/',

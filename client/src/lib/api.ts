@@ -48,6 +48,17 @@ export class ApiClient {
     return response.text();
   }
 
+  static async downloadBlob(endpoint: string): Promise<Blob> {
+    const url = `${this.baseUrl}${endpoint.startsWith('/') ? endpoint : `/${endpoint}`}`;
+    const response = await fetch(url, {
+      credentials: 'include'
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to download file: ${response.statusText}`);
+    }
+    return response.blob();
+  }
+
   static async getHealth(): Promise<ApiResponse<HealthCheckData>> {
     return this.request<HealthCheckData>('/health');
   }
