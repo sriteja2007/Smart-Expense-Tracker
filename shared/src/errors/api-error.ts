@@ -20,7 +20,10 @@ export class AppError extends Error {
     this.isOperational = isOperational;
     this.details = details;
     Object.setPrototypeOf(this, new.target.prototype);
-    Error.captureStackTrace(this, this.constructor);
+    const errObj = Error as unknown as { captureStackTrace?: (target: object, constructorOpt?: unknown) => void };
+    if (typeof errObj.captureStackTrace === 'function') {
+      errObj.captureStackTrace(this, this.constructor);
+    }
   }
 
   static badRequest(message: string, details?: ApiErrorDetail[]): AppError {
